@@ -6,7 +6,7 @@ import {
     clearAnthropicKey,
     MissingApiKeyError,
 } from './llm/index';
-import { SYSTEM_PROMPT, buildUserPrompt, fixupLinks } from './prompt';
+import { narrateDocument } from './narrate';
 import { renderMarkdown, renderLoading, renderError } from './webview';
 
 let panel: vscode.WebviewPanel | undefined;
@@ -82,11 +82,9 @@ async function runNarration(context: vscode.ExtensionContext, doc: vscode.TextDo
     try {
         const providerConfig = await readProviderConfig(context);
         const provider = makeProvider(providerConfig);
-        const userPrompt = buildUserPrompt(doc);
-        const raw = await provider.narrate(SYSTEM_PROMPT, userPrompt, token);
+        const markdown = await narrateDocument(doc, provider, token);
         if (token.isCancellationRequested || !panel) return;
-        const fixed = fixupLinks(raw, doc.uri);
-        panel.webview.html = renderMarkdown(panel.webview, fixed);
+        panel.webview.html = renderMarkdown(panel.webview, markdown);
     } catch (err) {
         if (token.isCancellationRequested || !panel) return;
         if (err instanceof MissingApiKeyError) {
