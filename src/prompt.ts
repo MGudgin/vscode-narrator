@@ -33,13 +33,11 @@ Output rules:
 
 export const SYMBOL_SYSTEM_PROMPT = `You are narrating one section of a source file for a developer reading the code on the left.
 
-Output format:
-- First line MUST be: Title: <a short human-readable section title>
-- Then a blank line.
-- Then 2-5 sentences in plain prose: what this section does, why it exists, any non-obvious behavior or invariants.
+Output rules:
+- Write 2-5 sentences in plain prose: what this section does, why it exists, any non-obvious behavior or invariants.
 - Use inline backticks for symbol names. Do NOT emit fenced code blocks; the reader sees the source on the left.
 - For inline references to specific lines, use markdown links of the form [text](narrate://lines/L<n>) or [text](narrate://lines/L<start>-L<end>). Use the line numbers shown in the leftmost column of the source.
-- Output nothing else: no preamble, no closing remarks, no headings.`;
+- Output nothing else: no title, no preamble, no closing remarks, no headings.`;
 
 export function buildUserPrompt(doc: vscode.TextDocument): string {
     const path = vscode.workspace.asRelativePath(doc.uri);
@@ -60,16 +58,6 @@ export function buildSymbolUserPrompt(unit: NarrationUnit, doc: vscode.TextDocum
         ? `Section: ${unit.name}${unit.detail ? ` — ${unit.detail}` : ''}`
         : `Section: ${unit.name} (file region — imports, module-level code, etc.)`;
     return `File: ${path}\nLanguage: ${doc.languageId}\n${header}\n\nSource:\n${numbered}`;
-}
-
-export function parseSectionResponse(text: string, fallbackTitle: string): { title: string; body: string } {
-    const trimmed = text.trim();
-    const titleMatch = trimmed.match(/^Title:\s*(.+?)\s*$/m);
-    if (titleMatch && trimmed.indexOf(titleMatch[0]) === 0) {
-        const body = trimmed.slice(titleMatch[0].length).replace(/^\s+/, '');
-        return { title: titleMatch[1], body };
-    }
-    return { title: fallbackTitle, body: trimmed };
 }
 
 function numberLines(text: string): string {

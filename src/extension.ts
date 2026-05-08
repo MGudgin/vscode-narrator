@@ -2,22 +2,32 @@ import * as vscode from 'vscode';
 import {
     readProviderConfig,
     makeProvider,
+    describeProvider,
     storeAnthropicKey,
     clearAnthropicKey,
     MissingApiKeyError,
 } from './llm/index';
-import { narrateDocument, narrateDiff } from './narrate';
-import { renderMarkdown, renderLoading, renderError } from './webview';
+import { narrateDocument, narrateDiff, NarrationSink } from './narrate';
+import { renderShell, renderError, renderMarkdownToHtml } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel } from './target';
+import { NarrationCache } from './cache';
+import { fixupLinks } from './prompt';
 
 let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
 let inFlight: vscode.CancellationTokenSource | undefined;
 let saveDebounce: NodeJS.Timeout | undefined;
+let cache: NarrationCache | undefined;
 
 const SAVE_DEBOUNCE_MS = 500;
+const RENDER_THROTTLE_MS = 100;
+
+interface RunOptions {
+    skipCache?: boolean;
+}
 
 export function activate(context: vscode.ExtensionContext): void {
+    cache = new NarrationCache(context.workspaceState);
     context.subscriptions.push(
         vscode.commands.registerCommand('codeNarration.open', () => openFileNarration(context)),
         vscode.commands.registerCommand('codeNarration.openDiff', () => openDiffNarration(context)),
@@ -62,7 +72,7 @@ async function refreshNarration(context: vscode.ExtensionContext): Promise<void>
         return;
     }
     ensurePanel(context);
-    await runNarration(context, currentTarget);
+    await runNarration(context, currentTarget, { skipCache: true });
 }
 
 function ensurePanel(context: vscode.ExtensionContext): void {
@@ -73,7 +83,7 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
         {
             enableCommandUris: true,
-            enableScripts: false,
+            enableScripts: true,
             retainContextWhenHidden: true,
         },
     );
@@ -88,8 +98,12 @@ function ensurePanel(context: vscode.ExtensionContext): void {
     );
 }
 
-async function runNarration(context: vscode.ExtensionContext, target: NarrationTarget): Promise<void> {
-    if (!panel) return;
+async function runNarration(
+    context: vscode.ExtensionContext,
+    target: NarrationTarget,
+    opts: RunOptions = {},
+): Promise<void> {
+    if (!panel || !cache) return;
 
     inFlight?.cancel();
     inFlight?.dispose();
@@ -99,20 +113,75 @@ async function runNarration(context: vscode.ExtensionContext, target: NarrationT
     currentTarget = target;
     const bannerLabel = targetBannerLabel(target);
     panel.title = targetTitle(target);
-    panel.webview.html = renderLoading(panel.webview, shortName(target.uri), bannerLabel);
+    panel.webview.html = renderShell(panel.webview, shortName(target.uri), bannerLabel);
     panel.reveal(vscode.ViewColumn.Beside, true);
+
+    const sectionState = new Map<string, { accumulated: string; lastRender: number; static: boolean }>();
+    const activePanel = panel;
+
+    const sink: NarrationSink = (event) => {
+        if (token.isCancellationRequested) return;
+        switch (event.kind) {
+            case 'init': {
+                sectionState.clear();
+                const sectionsForWebview = event.sections.map((s) => {
+                    const headingHtml = s.headingMarkdown
+                        ? renderMarkdownToHtml(fixupLinks(s.headingMarkdown, target.uri))
+                        : '';
+                    const bodyHtml = s.bodyMarkdown
+                        ? renderMarkdownToHtml(fixupLinks(s.bodyMarkdown, target.uri))
+                        : '';
+                    sectionState.set(s.id, {
+                        accumulated: s.bodyMarkdown ?? '',
+                        lastRender: 0,
+                        static: !!s.bodyMarkdown,
+                    });
+                    return { id: s.id, headingHtml, bodyHtml };
+                });
+                void activePanel.webview.postMessage({ kind: 'reset', sections: sectionsForWebview });
+                break;
+            }
+            case 'chunk': {
+                const state = sectionState.get(event.sectionId);
+                if (!state || state.static) return;
+                state.accumulated += event.text;
+                const now = Date.now();
+                if (now - state.lastRender < RENDER_THROTTLE_MS) return;
+                state.lastRender = now;
+                const html = renderMarkdownToHtml(fixupLinks(state.accumulated, target.uri));
+                void activePanel.webview.postMessage({ kind: 'replace', sectionId: event.sectionId, bodyHtml: html });
+                break;
+            }
+            case 'done': {
+                for (const [id, state] of sectionState) {
+                    if (state.static) continue;
+                    const md = state.accumulated.trim().length > 0
+                        ? state.accumulated
+                        : '_(no narration produced for this section.)_';
+                    const html = renderMarkdownToHtml(fixupLinks(md, target.uri));
+                    void activePanel.webview.postMessage({ kind: 'replace', sectionId: id, bodyHtml: html });
+                }
+                break;
+            }
+        }
+    };
 
     try {
         const doc = await vscode.workspace.openTextDocument(target.uri);
         const providerConfig = await readProviderConfig(context);
         const provider = makeProvider(providerConfig);
+        const providerInfo = describeProvider(providerConfig);
+        const narrateOptions = {
+            skipCache: opts.skipCache ?? false,
+            cache,
+            providerInfo,
+        };
 
-        const markdown = target.kind === 'file'
-            ? await narrateDocument(doc, provider, token)
-            : await narrateDiff(doc, target.baseRef, provider, token);
-
-        if (token.isCancellationRequested || !panel) return;
-        panel.webview.html = renderMarkdown(panel.webview, markdown, bannerLabel);
+        if (target.kind === 'file') {
+            await narrateDocument(doc, provider, token, sink, narrateOptions);
+        } else {
+            await narrateDiff(doc, target.baseRef, provider, token, sink, narrateOptions);
+        }
     } catch (err) {
         if (token.isCancellationRequested || !panel) return;
         if (err instanceof MissingApiKeyError) {

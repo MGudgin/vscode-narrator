@@ -3,7 +3,12 @@ import { VSCodeLmProvider } from './vscodeLm';
 import { AnthropicProvider } from './anthropic';
 
 export interface NarrationProvider {
-    narrate(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): Promise<string>;
+    stream(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): AsyncIterable<string>;
+}
+
+export interface ProviderInfo {
+    kind: string;
+    model: string;
 }
 
 export class MissingApiKeyError extends Error {
@@ -37,6 +42,11 @@ export async function readProviderConfig(context: vscode.ExtensionContext): Prom
 export function makeProvider(config: ProviderConfig): NarrationProvider {
     if (config.kind === 'anthropic') return new AnthropicProvider(config.apiKey, config.model);
     return new VSCodeLmProvider(config.modelFamily);
+}
+
+export function describeProvider(config: ProviderConfig): ProviderInfo {
+    if (config.kind === 'anthropic') return { kind: 'anthropic', model: config.model };
+    return { kind: 'vscodeLm', model: config.modelFamily ?? 'auto' };
 }
 
 export async function storeAnthropicKey(context: vscode.ExtensionContext, key: string): Promise<void> {

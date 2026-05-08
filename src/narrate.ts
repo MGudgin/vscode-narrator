@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import { NarrationProvider } from './llm/index';
+import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit, getNarrationUnits } from './symbols';
 import { getDiff } from './diff';
+import { NarrationCache, fileKey, diffKey } from './cache';
 import {
     SYSTEM_PROMPT,
     SYMBOL_SYSTEM_PROMPT,
@@ -10,44 +11,37 @@ import {
     buildSymbolUserPrompt,
     buildDiffUserPrompt,
     fixupLinks,
-    parseSectionResponse,
 } from './prompt';
 
 const SYMBOL_CONCURRENCY = 4;
+
+export interface SectionInit {
+    id: string;
+    headingMarkdown?: string;
+    bodyMarkdown?: string;
+}
+
+export type NarrationEvent =
+    | { kind: 'init'; sections: SectionInit[] }
+    | { kind: 'chunk'; sectionId: string; text: string }
+    | { kind: 'done' };
+
+export type NarrationSink = (event: NarrationEvent) => void;
+
+export interface NarrationOptions {
+    skipCache: boolean;
+    cache: NarrationCache;
+    providerInfo: ProviderInfo;
+}
 
 export async function narrateDocument(
     doc: vscode.TextDocument,
     provider: NarrationProvider,
     token: vscode.CancellationToken,
-): Promise<string> {
-    const units = await getNarrationUnits(doc);
-    if (token.isCancellationRequested) return '';
-
-    if (units.length === 0) {
-        const userPrompt = buildUserPrompt(doc);
-        const raw = await provider.narrate(SYSTEM_PROMPT, userPrompt, token);
-        return fixupLinks(raw, doc.uri);
-    }
-
-    const sections = await mapWithConcurrency(units, SYMBOL_CONCURRENCY, async (unit) => {
-        if (token.isCancellationRequested) return null;
-        const userPrompt = buildSymbolUserPrompt(unit, doc);
-        const raw = await provider.narrate(SYMBOL_SYSTEM_PROMPT, userPrompt, token);
-        if (token.isCancellationRequested) return null;
-        const parsed = parseSectionResponse(raw, unit.name);
-        return { unit, title: parsed.title, body: parsed.body };
-    });
-
-    if (token.isCancellationRequested) return '';
-
-    const parts: string[] = [];
-    for (const section of sections) {
-        if (!section) continue;
-        const heading = buildHeading(doc.uri, section.unit, section.title);
-        const body = fixupLinks(section.body, doc.uri);
-        parts.push(`${heading}\n\n${body}`);
-    }
-    return parts.join('\n\n');
+    sink: NarrationSink,
+    options: NarrationOptions,
+): Promise<void> {
+    return narrateFileBody(doc, provider, token, sink, options, []);
 }
 
 export async function narrateDiff(
@@ -55,27 +49,139 @@ export async function narrateDiff(
     baseRef: string,
     provider: NarrationProvider,
     token: vscode.CancellationToken,
-): Promise<string> {
+    sink: NarrationSink,
+    options: NarrationOptions,
+): Promise<void> {
     const diffResult = await getDiff(doc.uri, baseRef);
-    if (token.isCancellationRequested) return '';
+    if (token.isCancellationRequested) return;
 
     switch (diffResult.kind) {
         case 'noRepo':
             throw new Error('This file is not in a git repository.');
         case 'noChanges':
-            return `## No changes\n\nThis file is identical to \`${baseRef}\`.`;
+            sink({
+                kind: 'init',
+                sections: [{
+                    id: 'main',
+                    bodyMarkdown: `## No changes\n\nThis file is identical to \`${baseRef}\`.`,
+                }],
+            });
+            sink({ kind: 'done' });
+            return;
         case 'newFile': {
-            const fullFile = await narrateDocument(doc, provider, token);
-            const banner = `> _Newly added file — no base content vs \`${baseRef}\`._\n\n`;
-            return banner + fullFile;
+            const banner: SectionInit = {
+                id: 'banner',
+                bodyMarkdown: `> _Newly added file — no base content vs \`${baseRef}\`._`,
+            };
+            await narrateFileBody(doc, provider, token, sink, options, [banner]);
+            return;
         }
         case 'modified': {
-            const userPrompt = buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff);
-            const raw = await provider.narrate(DIFF_SYSTEM_PROMPT, userPrompt, token);
-            if (token.isCancellationRequested) return '';
-            return fixupLinks(raw, doc.uri);
+            const key = diffKey(doc.uri, diffResult.unifiedDiff, baseRef, options.providerInfo);
+            if (!options.skipCache) {
+                const cached = await options.cache.get(key);
+                if (cached) {
+                    sink({ kind: 'init', sections: [{ id: 'cached', bodyMarkdown: cached }] });
+                    sink({ kind: 'done' });
+                    return;
+                }
+            }
+            sink({ kind: 'init', sections: [{ id: 'main' }] });
+            let acc = '';
+            for await (const chunk of provider.stream(
+                DIFF_SYSTEM_PROMPT,
+                buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff),
+                token,
+            )) {
+                if (token.isCancellationRequested) return;
+                acc += chunk;
+                sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+            }
+            if (token.isCancellationRequested) return;
+            await options.cache.set(key, fixupLinks(acc, doc.uri));
+            sink({ kind: 'done' });
+            return;
         }
     }
+}
+
+async function narrateFileBody(
+    doc: vscode.TextDocument,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+    sink: NarrationSink,
+    options: NarrationOptions,
+    prefixSections: SectionInit[],
+): Promise<void> {
+    const key = fileKey(doc.uri, doc.getText(), options.providerInfo);
+    if (!options.skipCache) {
+        const cached = await options.cache.get(key);
+        if (cached) {
+            sink({
+                kind: 'init',
+                sections: [...prefixSections, { id: 'cached', bodyMarkdown: cached }],
+            });
+            sink({ kind: 'done' });
+            return;
+        }
+    }
+
+    const units = await getNarrationUnits(doc);
+    if (token.isCancellationRequested) return;
+
+    if (units.length === 0) {
+        sink({ kind: 'init', sections: [...prefixSections, { id: 'main' }] });
+        let acc = '';
+        for await (const chunk of provider.stream(SYSTEM_PROMPT, buildUserPrompt(doc), token)) {
+            if (token.isCancellationRequested) return;
+            acc += chunk;
+            sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+        }
+        if (token.isCancellationRequested) return;
+        await options.cache.set(key, fixupLinks(acc, doc.uri));
+        sink({ kind: 'done' });
+        return;
+    }
+
+    const sections = units.map((unit, i) => ({
+        id: `s${i}`,
+        unit,
+        headingMarkdown: buildHeading(doc.uri, unit, unit.name),
+        accumulated: '',
+    }));
+
+    sink({
+        kind: 'init',
+        sections: [
+            ...prefixSections,
+            ...sections.map((s) => ({ id: s.id, headingMarkdown: s.headingMarkdown })),
+        ],
+    });
+
+    await mapWithConcurrency(sections, SYMBOL_CONCURRENCY, async (sec) => {
+        if (token.isCancellationRequested) return;
+        for await (const chunk of provider.stream(
+            SYMBOL_SYSTEM_PROMPT,
+            buildSymbolUserPrompt(sec.unit, doc),
+            token,
+        )) {
+            if (token.isCancellationRequested) return;
+            sec.accumulated += chunk;
+            sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
+        }
+    });
+
+    if (token.isCancellationRequested) return;
+
+    const finalMd = sections
+        .map((s) => {
+            const body = fixupLinks(s.accumulated, doc.uri).trim()
+                || '_(no narration produced for this section.)_';
+            return `${s.headingMarkdown}\n\n${body}`;
+        })
+        .join('\n\n');
+    await options.cache.set(key, finalMd);
+    sink({ kind: 'done' });
 }
 
 function buildHeading(docUri: vscode.Uri, unit: NarrationUnit, title: string): string {
