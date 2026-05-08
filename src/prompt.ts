@@ -14,6 +14,23 @@ Output rules:
 - Use inline backticks for symbol names. Do NOT emit fenced code blocks; the reader sees the source on the left.
 - Begin your output with the first heading. No preamble, no closing remarks.`;
 
+export const DIFF_SYSTEM_PROMPT = `You are narrating CHANGES to a source file for a developer reviewing their work.
+
+You receive:
+- The current (post-change) file contents, line-numbered.
+- A unified diff vs a base ref.
+
+Output rules:
+- Focus on what CHANGED and WHY. Don't re-explain unchanged code unless context demands it.
+- Group related changes into sections. Each section starts with a level-2 heading whose text MUST be a markdown link of the form:
+    [Change summary](narrate://lines/L<start>-L<end>)
+  using line numbers from the CURRENT (post-change) file.
+- After the heading, write 2-5 sentences in plain prose: what changed, what behavior is now different, and any non-obvious consequences.
+- Use inline backticks for symbol names. Do NOT emit fenced code blocks; the reviewer can see the code on the left.
+- Inline references to specific lines should also be markdown links of the same form.
+- If the diff is small or trivial (e.g. whitespace, a renamed variable), say so briefly rather than padding.
+- Begin output with the first heading. No preamble, no closing remarks.`;
+
 export const SYMBOL_SYSTEM_PROMPT = `You are narrating one section of a source file for a developer reading the code on the left.
 
 Output format:
@@ -28,6 +45,12 @@ export function buildUserPrompt(doc: vscode.TextDocument): string {
     const path = vscode.workspace.asRelativePath(doc.uri);
     const numbered = numberLines(doc.getText());
     return `File: ${path}\nLanguage: ${doc.languageId}\n\nSource:\n${numbered}`;
+}
+
+export function buildDiffUserPrompt(doc: vscode.TextDocument, baseRef: string, unifiedDiff: string): string {
+    const path = vscode.workspace.asRelativePath(doc.uri);
+    const numbered = numberLines(doc.getText());
+    return `File: ${path}\nLanguage: ${doc.languageId}\nDiff base: ${baseRef}\n\nUnified diff:\n${unifiedDiff}\n\nCurrent (post-change) source:\n${numbered}`;
 }
 
 export function buildSymbolUserPrompt(unit: NarrationUnit, doc: vscode.TextDocument): string {
