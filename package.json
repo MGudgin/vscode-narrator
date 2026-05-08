@@ -101,6 +101,18 @@
           "type": "boolean",
           "default": true,
           "description": "Re-narrate the file when it is saved, if the narration pane is open and showing that file."
+        },
+        "codeNarration.symbolConcurrency": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "Maximum number of language model calls to run in parallel when narrating a symbol-aware file."
+        },
+        "codeNarration.recurseSymbols": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, narrate each child symbol (e.g., methods inside a class) as its own section in addition to its parent. Off by default to keep narration focused on top-level structure."
         }
       }
     }

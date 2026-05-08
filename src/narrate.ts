@@ -13,7 +13,13 @@ import {
     fixupLinks,
 } from './prompt';
 
-const SYMBOL_CONCURRENCY = 4;
+const DEFAULT_SYMBOL_CONCURRENCY = 4;
+
+function readSymbolConcurrency(): number {
+    const value = vscode.workspace.getConfiguration('codeNarration').get<number>('symbolConcurrency', DEFAULT_SYMBOL_CONCURRENCY);
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return DEFAULT_SYMBOL_CONCURRENCY;
+    return Math.min(16, Math.floor(value));
+}
 
 export interface SectionInit {
     id: string;
@@ -171,7 +177,7 @@ async function narrateFileBody(
         ],
     });
 
-    await mapWithConcurrency(sections, SYMBOL_CONCURRENCY, async (sec) => {
+    await mapWithConcurrency(sections, readSymbolConcurrency(), async (sec) => {
         if (token.isCancellationRequested) return;
         for await (const chunk of provider.stream(
             SYMBOL_SYSTEM_PROMPT,
