@@ -77,6 +77,23 @@ section[data-status="complete"] > h2::after {
   color: var(--vscode-charts-green, #4caf50);
   animation: none;
 }
+.section-dot {
+  display: inline-block;
+  margin-right: 0.55em;
+  margin-bottom: 0.4em;
+  font-size: 0.7em;
+  vertical-align: middle;
+  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+  transition: color 0.25s ease;
+}
+section[data-status="streaming"] > .section-dot {
+  color: var(--vscode-charts-yellow, #f5a623);
+  animation: cn-pulse 1.2s ease-in-out infinite;
+}
+section[data-status="complete"] > .section-dot {
+  color: var(--vscode-charts-green, #4caf50);
+  animation: none;
+}
 @keyframes cn-pulse {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
@@ -117,7 +134,9 @@ ${banner(bannerLabel)}
       }
       content.innerHTML = sections.map(function (s) {
         const status = s.status || 'queued';
+        const dot = (!s.headingHtml && !s.bodyHtml) ? '<span class="section-dot">●</span>' : '';
         return '<section data-id="' + s.id + '" data-status="' + status + '">'
+          + dot
           + (s.headingHtml || '')
           + '<div class="body" id="body-' + s.id + '">' + (s.bodyHtml || '') + '</div>'
           + '</section>';

@@ -11,7 +11,9 @@ export async function getNarrationUnits(doc: vscode.TextDocument): Promise<Narra
     const symbols = await fetchTopLevelSymbols(doc);
     if (symbols.length === 0) return [];
 
-    const sorted = [...symbols].sort((a, b) => a.range.start.line - b.range.start.line);
+    const recurse = vscode.workspace.getConfiguration('codeNarration').get<boolean>('recurseSymbols', false);
+    const expanded = recurse ? flattenSymbols(symbols) : symbols;
+    const sorted = [...expanded].sort((a, b) => a.range.start.line - b.range.start.line);
     const units: NarrationUnit[] = [];
 
     const firstStart = sorted[0].range.start;
@@ -41,6 +43,28 @@ export async function getNarrationUnits(doc: vscode.TextDocument): Promise<Narra
     }
 
     return units;
+}
+
+function flattenSymbols(
+    symbols: vscode.DocumentSymbol[],
+    parentPath: string = '',
+): vscode.DocumentSymbol[] {
+    const result: vscode.DocumentSymbol[] = [];
+    for (const s of symbols) {
+        const qualified = parentPath ? `${parentPath}.${s.name}` : s.name;
+        result.push({
+            name: qualified,
+            detail: s.detail,
+            kind: s.kind,
+            range: s.range,
+            selectionRange: s.selectionRange,
+            children: [],
+        } as vscode.DocumentSymbol);
+        if (s.children && s.children.length > 0) {
+            result.push(...flattenSymbols(s.children, qualified));
+        }
+    }
+    return result;
 }
 
 async function fetchTopLevelSymbols(doc: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {
