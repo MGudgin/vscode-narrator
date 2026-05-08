@@ -28,11 +28,21 @@ export const SymbolKind = {
     Function: 11, Variable: 12, Constant: 13,
 };
 
+const configOverrides = new Map<string, unknown>();
+
+export function __setConfig(key: string, value: unknown): void {
+    configOverrides.set(key, value);
+}
+
+export function __resetConfig(): void {
+    configOverrides.clear();
+}
+
 export const workspace = {
     getConfiguration(_section: string) {
         return {
-            get<T>(_key: string, defaultValue: T): T {
-                return defaultValue;
+            get<T>(key: string, defaultValue: T): T {
+                return configOverrides.has(key) ? (configOverrides.get(key) as T) : defaultValue;
             },
         };
     },
@@ -42,3 +52,16 @@ export const workspace = {
         return u.fsPath ?? String(uri);
     },
 };
+
+export class CancellationTokenSource {
+    private cancelled = false;
+    token: { isCancellationRequested: boolean; onCancellationRequested: (cb: () => void) => { dispose: () => void } } = {
+        get isCancellationRequested() { return false; },
+        onCancellationRequested: () => ({ dispose: () => {} }),
+    };
+    cancel(): void {
+        this.cancelled = true;
+        Object.defineProperty(this.token, 'isCancellationRequested', { value: true, configurable: true });
+    }
+    dispose(): void { /* noop */ }
+}
