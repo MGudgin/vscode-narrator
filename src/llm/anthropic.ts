@@ -9,12 +9,11 @@ export class AnthropicProvider implements NarrationProvider {
         this.client = new Anthropic({ apiKey });
     }
 
-    async narrate(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): Promise<string> {
+    async *stream(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): AsyncGenerator<string> {
         const abortController = new AbortController();
-        const cancelSub = token.onCancellationRequested(() => abortController.abort());
-
+        const sub = token.onCancellationRequested(() => abortController.abort());
         try {
-            const response = await this.client.messages.create(
+            const stream = this.client.messages.stream(
                 {
                     model: this.model,
                     max_tokens: 8192,
@@ -29,13 +28,13 @@ export class AnthropicProvider implements NarrationProvider {
                 },
                 { signal: abortController.signal },
             );
-
-            return response.content
-                .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-                .map((b) => b.text)
-                .join('');
+            for await (const event of stream) {
+                if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+                    yield event.delta.text;
+                }
+            }
         } finally {
-            cancelSub.dispose();
+            sub.dispose();
         }
     }
 }

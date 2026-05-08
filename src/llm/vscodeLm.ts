@@ -4,7 +4,7 @@ import { NarrationProvider } from './index';
 export class VSCodeLmProvider implements NarrationProvider {
     constructor(private readonly modelFamily?: string) {}
 
-    async narrate(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): Promise<string> {
+    async *stream(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): AsyncGenerator<string> {
         const selector: vscode.LanguageModelChatSelector = this.modelFamily
             ? { family: this.modelFamily }
             : {};
@@ -16,15 +16,12 @@ export class VSCodeLmProvider implements NarrationProvider {
                     : 'No language models are available. Install GitHub Copilot, or set codeNarration.provider to "anthropic".',
             );
         }
-        const [model] = models;
         const messages = [
             vscode.LanguageModelChatMessage.User(systemPrompt + '\n\n---\n\n' + userPrompt),
         ];
-        const response = await model.sendRequest(messages, {}, token);
-        let result = '';
+        const response = await models[0].sendRequest(messages, {}, token);
         for await (const chunk of response.text) {
-            result += chunk;
+            yield chunk;
         }
-        return result;
     }
 }

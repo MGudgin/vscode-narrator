@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import MarkdownIt from 'markdown-it';
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
@@ -45,39 +46,20 @@ blockquote {
 .banner-actions a { margin-left: 0.75em; }
 .status { color: var(--vscode-descriptionForeground); font-style: italic; }
 .error { color: var(--vscode-errorForeground); }
+section { margin-bottom: 1.25rem; }
+section .body:empty::before {
+  content: '…';
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
 `;
 
-export function renderMarkdown(webview: vscode.Webview, markdown: string, bannerLabel?: string): string {
-    return wrap(webview, banner(bannerLabel) + md.render(markdown));
-}
-
-export function renderLoading(webview: vscode.Webview, fileLabel: string, bannerLabel?: string): string {
-    const body = `${banner(bannerLabel)}<h1>Narrating <code>${escapeHtml(fileLabel)}</code>…</h1>
-<p class="status">Calling the language model. This may take a few seconds.</p>`;
-    return wrap(webview, body);
-}
-
-export function renderError(webview: vscode.Webview, message: string, hint?: string, bannerLabel?: string): string {
-    const hintHtml = hint ? `<p>${escapeHtml(hint)}</p>` : '';
-    const body = `${banner(bannerLabel)}<h1 class="error">Narration failed</h1>
-<p>${escapeHtml(message)}</p>
-${hintHtml}`;
-    return wrap(webview, body);
-}
-
-function banner(label?: string): string {
-    if (!label) return '';
-    const refresh = `command:codeNarration.refresh`;
-    return `<div class="banner">
-  <span class="banner-label">${escapeHtml(label)}</span>
-  <span class="banner-actions"><a href="${refresh}" title="Re-run narration">↻ Refresh</a></span>
-</div>`;
-}
-
-function wrap(webview: vscode.Webview, body: string): string {
+export function renderShell(webview: vscode.Webview, fileLabel: string, bannerLabel?: string): string {
+    const nonce = makeNonce();
     const csp = [
         `default-src 'none'`,
         `style-src ${webview.cspSource} 'unsafe-inline'`,
+        `script-src 'nonce-${nonce}'`,
         `img-src ${webview.cspSource} https: data:`,
     ].join('; ');
 
@@ -90,9 +72,77 @@ function wrap(webview: vscode.Webview, body: string): string {
   <style>${STYLES}</style>
 </head>
 <body>
-${body}
+${banner(bannerLabel)}
+<div id="content">
+  <h1>Narrating <code>${escapeHtml(fileLabel)}</code>…</h1>
+  <p class="status">Calling the language model.</p>
+</div>
+<script nonce="${nonce}">
+  (function () {
+    const content = document.getElementById('content');
+    function reset(sections) {
+      content.innerHTML = sections.map(function (s) {
+        return '<section data-id="' + s.id + '">'
+          + (s.headingHtml || '')
+          + '<div class="body" id="body-' + s.id + '">' + (s.bodyHtml || '') + '</div>'
+          + '</section>';
+      }).join('');
+    }
+    function replace(id, html) {
+      const el = document.getElementById('body-' + id);
+      if (el) el.innerHTML = html;
+    }
+    window.addEventListener('message', function (e) {
+      const msg = e.data;
+      if (!msg) return;
+      if (msg.kind === 'reset') reset(msg.sections);
+      else if (msg.kind === 'replace') replace(msg.sectionId, msg.bodyHtml);
+    });
+  })();
+</script>
 </body>
 </html>`;
+}
+
+export function renderError(webview: vscode.Webview, message: string, hint?: string, bannerLabel?: string): string {
+    const csp = [
+        `default-src 'none'`,
+        `style-src ${webview.cspSource} 'unsafe-inline'`,
+        `img-src ${webview.cspSource} https: data:`,
+    ].join('; ');
+    const hintHtml = hint ? `<p>${escapeHtml(hint)}</p>` : '';
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <title>Narration</title>
+  <style>${STYLES}</style>
+</head>
+<body>
+${banner(bannerLabel)}
+<h1 class="error">Narration failed</h1>
+<p>${escapeHtml(message)}</p>
+${hintHtml}
+</body>
+</html>`;
+}
+
+export function renderMarkdownToHtml(markdown: string): string {
+    return md.render(markdown);
+}
+
+function banner(label?: string): string {
+    if (!label) return '';
+    const refresh = `command:codeNarration.refresh`;
+    return `<div class="banner">
+  <span class="banner-label">${escapeHtml(label)}</span>
+  <span class="banner-actions"><a href="${refresh}" title="Re-run narration">↻ Refresh</a></span>
+</div>`;
+}
+
+function makeNonce(): string {
+    return crypto.randomBytes(16).toString('base64');
 }
 
 function escapeHtml(s: string): string {
