@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit, getNarrationUnits } from './symbols';
-import { getDiff } from './diff';
+import { DiffResult, getDiff } from './diff';
 import { NarrationCache, fileKey, diffKey } from './cache';
 import {
     SYSTEM_PROMPT,
@@ -42,6 +42,9 @@ export interface NarrationOptions {
     skipCache: boolean;
     cache: NarrationCache;
     providerInfo: ProviderInfo;
+    fetchUnits?: (doc: vscode.TextDocument) => Promise<NarrationUnit[]>;
+    fetchDiff?: (uri: vscode.Uri, baseRef: string) => Promise<DiffResult>;
+    concurrency?: number;
 }
 
 export async function narrateDocument(
@@ -62,7 +65,8 @@ export async function narrateDiff(
     sink: NarrationSink,
     options: NarrationOptions,
 ): Promise<void> {
-    const diffResult = await getDiff(doc.uri, baseRef);
+    const fetchDiff = options.fetchDiff ?? getDiff;
+    const diffResult = await fetchDiff(doc.uri, baseRef);
     if (token.isCancellationRequested) return;
 
     switch (diffResult.kind) {
@@ -151,7 +155,8 @@ async function narrateFileBody(
         }
     }
 
-    const units = await getNarrationUnits(doc);
+    const fetchUnits = options.fetchUnits ?? getNarrationUnits;
+    const units = await fetchUnits(doc);
     if (token.isCancellationRequested) return;
 
     if (units.length === 0) {
@@ -197,7 +202,8 @@ async function narrateFileBody(
         ],
     });
 
-    await mapWithConcurrency(sections, readSymbolConcurrency(), async (sec) => {
+    const concurrency = options.concurrency ?? readSymbolConcurrency();
+    await mapWithConcurrency(sections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;
         try {
             await withTransientRetry(

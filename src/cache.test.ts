@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { NarrationCache, fileKey, diffKey } from './cache';
 
@@ -50,6 +50,57 @@ describe('NarrationCache', () => {
         await cache.clearAll();
         expect(await cache.get('a')).toBeUndefined();
         expect(await cache.get('b')).toBeUndefined();
+    });
+});
+
+describe('NarrationCache LRU eviction', () => {
+    let memento: MemoryMemento;
+    let cache: NarrationCache;
+    let fakeNow = 0;
+
+    beforeEach(() => {
+        memento = new MemoryMemento();
+        cache = new NarrationCache(memento);
+        fakeNow = 1_700_000_000_000;
+        vi.spyOn(Date, 'now').mockImplementation(() => ++fakeNow);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    test('caps the store at 50 entries', async () => {
+        for (let i = 0; i < 60; i++) {
+            await cache.set(`k${i}`, `v${i}`);
+        }
+        const stored = memento.get<unknown[]>('codeNarration.cache.v1', []);
+        expect(stored).toHaveLength(50);
+    });
+
+    test('evicts the oldest entries first when over capacity', async () => {
+        for (let i = 0; i < 51; i++) {
+            await cache.set(`k${i}`, `v${i}`);
+        }
+        // The first-set entry has the smallest timestamp, so it gets dropped.
+        expect(await cache.get('k0')).toBeUndefined();
+        // The most recently added entries remain.
+        expect(await cache.get('k50')).toBe('v50');
+        expect(await cache.get('k1')).toBe('v1');
+    });
+
+    test('get() refreshes the timestamp so a touched entry survives eviction', async () => {
+        await cache.set('keep', 'kept-value');
+        // Fill another 49 entries so we are at exactly 50 with 'keep' as the oldest.
+        for (let i = 0; i < 49; i++) {
+            await cache.set(`fill${i}`, `v${i}`);
+        }
+        // Touch 'keep' to bump its timestamp ahead of the oldest fill entries.
+        expect(await cache.get('keep')).toBe('kept-value');
+        // Add two more so something must be evicted; 'keep' should survive.
+        await cache.set('new1', 'n1');
+        await cache.set('new2', 'n2');
+        expect(await cache.get('keep')).toBe('kept-value');
+        expect(await cache.get('fill0')).toBeUndefined();
     });
 });
 
