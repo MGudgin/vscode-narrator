@@ -1,11 +1,14 @@
 import * as vscode from 'vscode';
 import { NarrationProvider } from './llm/index';
 import { NarrationUnit, getNarrationUnits } from './symbols';
+import { getDiff } from './diff';
 import {
     SYSTEM_PROMPT,
     SYMBOL_SYSTEM_PROMPT,
+    DIFF_SYSTEM_PROMPT,
     buildUserPrompt,
     buildSymbolUserPrompt,
+    buildDiffUserPrompt,
     fixupLinks,
     parseSectionResponse,
 } from './prompt';
@@ -45,6 +48,34 @@ export async function narrateDocument(
         parts.push(`${heading}\n\n${body}`);
     }
     return parts.join('\n\n');
+}
+
+export async function narrateDiff(
+    doc: vscode.TextDocument,
+    baseRef: string,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+): Promise<string> {
+    const diffResult = await getDiff(doc.uri, baseRef);
+    if (token.isCancellationRequested) return '';
+
+    switch (diffResult.kind) {
+        case 'noRepo':
+            throw new Error('This file is not in a git repository.');
+        case 'noChanges':
+            return `## No changes\n\nThis file is identical to \`${baseRef}\`.`;
+        case 'newFile': {
+            const fullFile = await narrateDocument(doc, provider, token);
+            const banner = `> _Newly added file — no base content vs \`${baseRef}\`._\n\n`;
+            return banner + fullFile;
+        }
+        case 'modified': {
+            const userPrompt = buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff);
+            const raw = await provider.narrate(DIFF_SYSTEM_PROMPT, userPrompt, token);
+            if (token.isCancellationRequested) return '';
+            return fixupLinks(raw, doc.uri);
+        }
+    }
 }
 
 function buildHeading(docUri: vscode.Uri, unit: NarrationUnit, title: string): string {
