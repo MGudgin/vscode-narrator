@@ -97,7 +97,7 @@
         "codeNarration.diffBase": {
           "type": "string",
           "default": "HEAD",
-          "description": "Git ref to diff against in diff narration mode (used in phase 4)."
+          "description": "Git ref to diff against in diff narration mode."
         },
         "codeNarration.narrateOnSave": {
           "type": "boolean",
