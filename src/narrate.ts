@@ -25,6 +25,7 @@ export interface SectionInit {
 export type NarrationEvent =
     | { kind: 'init'; sections: SectionInit[]; fromCache?: boolean }
     | { kind: 'chunk'; sectionId: string; text: string }
+    | { kind: 'sectionDone'; sectionId: string }
     | { kind: 'done' };
 
 export type NarrationSink = (event: NarrationEvent) => void;
@@ -103,6 +104,7 @@ export async function narrateDiff(
                 sink({ kind: 'chunk', sectionId: 'main', text: chunk });
             }
             if (token.isCancellationRequested) return;
+            sink({ kind: 'sectionDone', sectionId: 'main' });
             await options.cache.set(key, fixupLinks(acc, doc.uri));
             sink({ kind: 'done' });
             return;
@@ -144,6 +146,7 @@ async function narrateFileBody(
             sink({ kind: 'chunk', sectionId: 'main', text: chunk });
         }
         if (token.isCancellationRequested) return;
+        sink({ kind: 'sectionDone', sectionId: 'main' });
         await options.cache.set(key, fixupLinks(acc, doc.uri));
         sink({ kind: 'done' });
         return;
@@ -178,6 +181,9 @@ async function narrateFileBody(
             if (token.isCancellationRequested) return;
             sec.accumulated += chunk;
             sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
+        }
+        if (!token.isCancellationRequested) {
+            sink({ kind: 'sectionDone', sectionId: sec.id });
         }
     });
 
