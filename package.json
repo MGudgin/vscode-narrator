@@ -1,0 +1,59 @@
+{
+  "name": "code-narration",
+  "displayName": "Code Narration",
+  "description": "LLM-powered narration of code and diffs in a side pane.",
+  "version": "0.0.1",
+  "publisher": "gudge",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeNarration.open",
+        "title": "Open Narration",
+        "category": "Code Narration",
+        "icon": "$(book)"
+      },
+      {
+        "command": "codeNarration.reveal",
+        "title": "Reveal Code Location",
+        "category": "Code Narration"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codeNarration.open",
+          "group": "navigation",
+          "when": "editorIsOpen"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codeNarration.reveal",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.0"
+  }
+}
