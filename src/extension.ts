@@ -181,6 +181,24 @@ async function runNarration(
                 void activePanel.webview.postMessage({ kind: 'replace', sectionId: event.sectionId, bodyHtml: html });
                 break;
             }
+            case 'sectionReset': {
+                const state = sectionState.get(event.sectionId);
+                if (!state || state.static) return;
+                state.accumulated = '';
+                state.lastRender = 0;
+                state.status = 'streaming';
+                void activePanel.webview.postMessage({
+                    kind: 'replace',
+                    sectionId: event.sectionId,
+                    bodyHtml: '',
+                });
+                void activePanel.webview.postMessage({
+                    kind: 'sectionStatus',
+                    sectionId: event.sectionId,
+                    status: 'streaming',
+                });
+                break;
+            }
             case 'sectionDone': {
                 const state = sectionState.get(event.sectionId);
                 if (!state) return;

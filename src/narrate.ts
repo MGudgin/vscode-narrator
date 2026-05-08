@@ -12,6 +12,7 @@ import {
     buildDiffUserPrompt,
     fixupLinks,
 } from './prompt';
+import { withTransientRetry } from './retry';
 
 const DEFAULT_SYMBOL_CONCURRENCY = 4;
 
@@ -31,6 +32,7 @@ export interface SectionInit {
 export type NarrationEvent =
     | { kind: 'init'; sections: SectionInit[]; fromCache?: boolean }
     | { kind: 'chunk'; sectionId: string; text: string }
+    | { kind: 'sectionReset'; sectionId: string }
     | { kind: 'sectionDone'; sectionId: string }
     | { kind: 'done' };
 
@@ -100,15 +102,24 @@ export async function narrateDiff(
             }
             sink({ kind: 'init', sections: [{ id: 'main' }] });
             let acc = '';
-            for await (const chunk of provider.stream(
-                DIFF_SYSTEM_PROMPT,
-                buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff),
-                token,
-            )) {
-                if (token.isCancellationRequested) return;
-                acc += chunk;
-                sink({ kind: 'chunk', sectionId: 'main', text: chunk });
-            }
+            await withTransientRetry(
+                async (attempt) => {
+                    if (attempt > 0) {
+                        acc = '';
+                        sink({ kind: 'sectionReset', sectionId: 'main' });
+                    }
+                    for await (const chunk of provider.stream(
+                        DIFF_SYSTEM_PROMPT,
+                        buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff),
+                        token,
+                    )) {
+                        if (token.isCancellationRequested) return;
+                        acc += chunk;
+                        sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+                    }
+                },
+                { isCancelled: () => token.isCancellationRequested },
+            );
             if (token.isCancellationRequested) return;
             sink({ kind: 'sectionDone', sectionId: 'main' });
             await options.cache.set(key, fixupLinks(acc, doc.uri));
@@ -146,11 +157,20 @@ async function narrateFileBody(
     if (units.length === 0) {
         sink({ kind: 'init', sections: [...prefixSections, { id: 'main' }] });
         let acc = '';
-        for await (const chunk of provider.stream(SYSTEM_PROMPT, buildUserPrompt(doc), token)) {
-            if (token.isCancellationRequested) return;
-            acc += chunk;
-            sink({ kind: 'chunk', sectionId: 'main', text: chunk });
-        }
+        await withTransientRetry(
+            async (attempt) => {
+                if (attempt > 0) {
+                    acc = '';
+                    sink({ kind: 'sectionReset', sectionId: 'main' });
+                }
+                for await (const chunk of provider.stream(SYSTEM_PROMPT, buildUserPrompt(doc), token)) {
+                    if (token.isCancellationRequested) return;
+                    acc += chunk;
+                    sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+                }
+            },
+            { isCancelled: () => token.isCancellationRequested },
+        );
         if (token.isCancellationRequested) return;
         sink({ kind: 'sectionDone', sectionId: 'main' });
         await options.cache.set(key, fixupLinks(acc, doc.uri));
@@ -179,14 +199,30 @@ async function narrateFileBody(
 
     await mapWithConcurrency(sections, readSymbolConcurrency(), async (sec) => {
         if (token.isCancellationRequested) return;
-        for await (const chunk of provider.stream(
-            SYMBOL_SYSTEM_PROMPT,
-            buildSymbolUserPrompt(sec.unit, doc),
-            token,
-        )) {
+        try {
+            await withTransientRetry(
+                async (attempt) => {
+                    if (attempt > 0) {
+                        sec.accumulated = '';
+                        sink({ kind: 'sectionReset', sectionId: sec.id });
+                    }
+                    for await (const chunk of provider.stream(
+                        SYMBOL_SYSTEM_PROMPT,
+                        buildSymbolUserPrompt(sec.unit, doc),
+                        token,
+                    )) {
+                        if (token.isCancellationRequested) return;
+                        sec.accumulated += chunk;
+                        sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
+                    }
+                },
+                { isCancelled: () => token.isCancellationRequested },
+            );
+        } catch (err) {
             if (token.isCancellationRequested) return;
-            sec.accumulated += chunk;
-            sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
+            sec.accumulated = `_(failed: ${errorMessage(err)})_`;
+            sink({ kind: 'sectionReset', sectionId: sec.id });
+            sink({ kind: 'chunk', sectionId: sec.id, text: sec.accumulated });
         }
         if (!token.isCancellationRequested) {
             sink({ kind: 'sectionDone', sectionId: sec.id });
@@ -214,6 +250,11 @@ function buildHeading(docUri: vscode.Uri, unit: NarrationUnit, title: string): s
     const args = encodeURIComponent(JSON.stringify([docUri.toString(), range]));
     const safeTitle = title.replace(/[\[\]]/g, '\\$&').replace(/[\r\n]+/g, ' ').trim();
     return `## [${safeTitle}](command:codeNarration.reveal?${args})`;
+}
+
+function errorMessage(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    return String(err);
 }
 
 async function mapWithConcurrency<T, R>(
