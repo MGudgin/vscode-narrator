@@ -46,7 +46,15 @@ blockquote {
 .banner-actions a { margin-left: 0.75em; }
 .status { color: var(--vscode-descriptionForeground); font-style: italic; }
 .error { color: var(--vscode-errorForeground); }
-section { margin-bottom: 1.25rem; }
+section {
+  margin: 0 -0.5em 1.25rem -0.5em;
+  padding: 0 0.5em;
+  border-radius: 4px;
+  transition: background-color 0.25s ease;
+}
+section.highlighted {
+  background-color: var(--vscode-editor-rangeHighlightBackground, rgba(255, 200, 0, 0.15));
+}
 section .body:empty::before {
   content: '…';
   color: var(--vscode-descriptionForeground);
@@ -80,7 +88,12 @@ ${banner(bannerLabel)}
 <script nonce="${nonce}">
   (function () {
     const content = document.getElementById('content');
-    function reset(sections) {
+    let highlightTimer = null;
+    function reset(sections, bannerLabel) {
+      if (typeof bannerLabel === 'string') {
+        const lbl = document.getElementById('banner-label');
+        if (lbl) lbl.textContent = bannerLabel;
+      }
       content.innerHTML = sections.map(function (s) {
         return '<section data-id="' + s.id + '">'
           + (s.headingHtml || '')
@@ -92,11 +105,20 @@ ${banner(bannerLabel)}
       const el = document.getElementById('body-' + id);
       if (el) el.innerHTML = html;
     }
+    function highlight(id) {
+      const el = document.querySelector('section[data-id="' + id + '"]');
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('highlighted');
+      if (highlightTimer) clearTimeout(highlightTimer);
+      highlightTimer = setTimeout(function () { el.classList.remove('highlighted'); }, 1500);
+    }
     window.addEventListener('message', function (e) {
       const msg = e.data;
       if (!msg) return;
-      if (msg.kind === 'reset') reset(msg.sections);
+      if (msg.kind === 'reset') reset(msg.sections, msg.bannerLabel);
       else if (msg.kind === 'replace') replace(msg.sectionId, msg.bodyHtml);
+      else if (msg.kind === 'highlight') highlight(msg.sectionId);
     });
   })();
 </script>
@@ -136,7 +158,7 @@ function banner(label?: string): string {
     if (!label) return '';
     const refresh = `command:codeNarration.refresh`;
     return `<div class="banner">
-  <span class="banner-label">${escapeHtml(label)}</span>
+  <span class="banner-label" id="banner-label">${escapeHtml(label)}</span>
   <span class="banner-actions"><a href="${refresh}" title="Re-run narration">↻ Refresh</a></span>
 </div>`;
 }

@@ -17,10 +17,13 @@ let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
 let inFlight: vscode.CancellationTokenSource | undefined;
 let saveDebounce: NodeJS.Timeout | undefined;
+let selectionDebounce: NodeJS.Timeout | undefined;
 let cache: NarrationCache | undefined;
+const sectionRanges: { id: string; range: vscode.Range }[] = [];
 
 const SAVE_DEBOUNCE_MS = 500;
 const RENDER_THROTTLE_MS = 100;
+const SELECTION_DEBOUNCE_MS = 200;
 
 interface RunOptions {
     skipCache?: boolean;
@@ -34,7 +37,10 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('codeNarration.refresh', () => refreshNarration(context)),
         vscode.commands.registerCommand('codeNarration.reveal', revealLocation),
         vscode.commands.registerCommand('codeNarration.setApiKey', () => setApiKey(context)),
+        vscode.commands.registerCommand('codeNarration.pickModel', () => pickModel(context)),
+        vscode.commands.registerCommand('codeNarration.clearCache', () => clearCacheCommand()),
         vscode.workspace.onDidSaveTextDocument((doc) => onSave(context, doc)),
+        vscode.window.onDidChangeTextEditorSelection(onSelectionChange),
     );
 }
 
@@ -43,6 +49,7 @@ export function deactivate(): void {
     inFlight?.dispose();
     panel?.dispose();
     if (saveDebounce) clearTimeout(saveDebounce);
+    if (selectionDebounce) clearTimeout(selectionDebounce);
 }
 
 async function openFileNarration(context: vscode.ExtensionContext): Promise<void> {
@@ -111,6 +118,7 @@ async function runNarration(
     const token = inFlight.token;
 
     currentTarget = target;
+    sectionRanges.length = 0;
     const bannerLabel = targetBannerLabel(target);
     panel.title = targetTitle(target);
     panel.webview.html = renderShell(panel.webview, shortName(target.uri), bannerLabel);
@@ -124,7 +132,11 @@ async function runNarration(
         switch (event.kind) {
             case 'init': {
                 sectionState.clear();
+                sectionRanges.length = 0;
                 const sectionsForWebview = event.sections.map((s) => {
+                    if (s.range) {
+                        sectionRanges.push({ id: s.id, range: s.range });
+                    }
                     const headingHtml = s.headingMarkdown
                         ? renderMarkdownToHtml(fixupLinks(s.headingMarkdown, target.uri))
                         : '';
@@ -138,7 +150,12 @@ async function runNarration(
                     });
                     return { id: s.id, headingHtml, bodyHtml };
                 });
-                void activePanel.webview.postMessage({ kind: 'reset', sections: sectionsForWebview });
+                const labelWithCache = event.fromCache ? `${bannerLabel} • Cached` : bannerLabel;
+                void activePanel.webview.postMessage({
+                    kind: 'reset',
+                    sections: sectionsForWebview,
+                    bannerLabel: labelWithCache,
+                });
                 break;
             }
             case 'chunk': {
@@ -203,6 +220,24 @@ async function runNarration(
     }
 }
 
+function onSelectionChange(e: vscode.TextEditorSelectionChangeEvent): void {
+    if (!panel || !currentTarget) return;
+    if (e.textEditor.document.uri.toString() !== currentTarget.uri.toString()) return;
+    if (sectionRanges.length === 0) return;
+    const cursorLine = e.selections[0]?.active.line;
+    if (cursorLine === undefined) return;
+    const match = sectionRanges.find(
+        (s) => cursorLine >= s.range.start.line && cursorLine <= s.range.end.line,
+    );
+    if (!match) return;
+    if (selectionDebounce) clearTimeout(selectionDebounce);
+    const matchedId = match.id;
+    selectionDebounce = setTimeout(() => {
+        if (!panel) return;
+        void panel.webview.postMessage({ kind: 'highlight', sectionId: matchedId });
+    }, SELECTION_DEBOUNCE_MS);
+}
+
 function onSave(context: vscode.ExtensionContext, doc: vscode.TextDocument): void {
     if (!panel || !currentTarget) return;
     if (!targetMatchesSavedDoc(currentTarget, doc.uri)) return;
@@ -211,6 +246,89 @@ function onSave(context: vscode.ExtensionContext, doc: vscode.TextDocument): voi
     if (saveDebounce) clearTimeout(saveDebounce);
     const target = currentTarget;
     saveDebounce = setTimeout(() => void runNarration(context, target), SAVE_DEBOUNCE_MS);
+}
+
+interface ModelChoice extends vscode.QuickPickItem {
+    pick?: { kind: 'vscodeLm'; family: string } | { kind: 'anthropic'; model: string };
+}
+
+async function pickModel(context: vscode.ExtensionContext): Promise<void> {
+    const items: ModelChoice[] = [];
+
+    let lmModels: vscode.LanguageModelChat[] = [];
+    try {
+        lmModels = await vscode.lm.selectChatModels();
+    } catch {
+        // No LM API available.
+    }
+
+    if (lmModels.length > 0) {
+        items.push({ label: 'VS Code Language Model', kind: vscode.QuickPickItemKind.Separator });
+        for (const m of lmModels) {
+            items.push({
+                label: `$(rocket) ${m.name}`,
+                description: `${m.vendor} • family: ${m.family}`,
+                detail: 'VS Code LM API',
+                pick: { kind: 'vscodeLm', family: m.family },
+            });
+        }
+    }
+
+    items.push({ label: 'Anthropic API', kind: vscode.QuickPickItemKind.Separator });
+    const presets = [
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', desc: 'Fast, high-quality (default)' },
+        { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', desc: 'Best quality, slower & costlier' },
+        { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', desc: 'Cheapest, fastest' },
+    ];
+    for (const p of presets) {
+        items.push({
+            label: `$(server-environment) ${p.name}`,
+            description: p.id,
+            detail: p.desc,
+            pick: { kind: 'anthropic', model: p.id },
+        });
+    }
+
+    const choice = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Select a language model for narration',
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+    if (!choice?.pick) return;
+
+    const config = vscode.workspace.getConfiguration('codeNarration');
+    const target = vscode.ConfigurationTarget.Global;
+    if (choice.pick.kind === 'vscodeLm') {
+        await config.update('provider', 'vscodeLm', target);
+        await config.update('vscodeLm.modelFamily', choice.pick.family, target);
+        vscode.window.showInformationMessage(`Code Narration: model set to VS Code LM (${choice.pick.family}).`);
+    } else {
+        await config.update('provider', 'anthropic', target);
+        await config.update('anthropic.model', choice.pick.model, target);
+        const key = await context.secrets.get('codeNarration.anthropicApiKey');
+        if (!key) {
+            const setIt = 'Set API Key';
+            const ans = await vscode.window.showWarningMessage(
+                `Code Narration: model set to Anthropic ${choice.pick.model}, but no API key is configured.`,
+                setIt,
+            );
+            if (ans === setIt) await setApiKey(context);
+        } else {
+            vscode.window.showInformationMessage(`Code Narration: model set to Anthropic ${choice.pick.model}.`);
+        }
+    }
+}
+
+async function clearCacheCommand(): Promise<void> {
+    if (!cache) return;
+    const ans = await vscode.window.showWarningMessage(
+        'Clear all cached narrations?',
+        { modal: false },
+        'Clear',
+    );
+    if (ans !== 'Clear') return;
+    await cache.clearAll();
+    vscode.window.showInformationMessage('Code Narration: cache cleared.');
 }
 
 async function setApiKey(context: vscode.ExtensionContext): Promise<void> {

@@ -19,10 +19,11 @@ export interface SectionInit {
     id: string;
     headingMarkdown?: string;
     bodyMarkdown?: string;
+    range?: vscode.Range;
 }
 
 export type NarrationEvent =
-    | { kind: 'init'; sections: SectionInit[] }
+    | { kind: 'init'; sections: SectionInit[]; fromCache?: boolean }
     | { kind: 'chunk'; sectionId: string; text: string }
     | { kind: 'done' };
 
@@ -81,7 +82,11 @@ export async function narrateDiff(
             if (!options.skipCache) {
                 const cached = await options.cache.get(key);
                 if (cached) {
-                    sink({ kind: 'init', sections: [{ id: 'cached', bodyMarkdown: cached }] });
+                    sink({
+                        kind: 'init',
+                        sections: [{ id: 'cached', bodyMarkdown: cached }],
+                        fromCache: true,
+                    });
                     sink({ kind: 'done' });
                     return;
                 }
@@ -120,6 +125,7 @@ async function narrateFileBody(
             sink({
                 kind: 'init',
                 sections: [...prefixSections, { id: 'cached', bodyMarkdown: cached }],
+                fromCache: true,
             });
             sink({ kind: 'done' });
             return;
@@ -154,7 +160,11 @@ async function narrateFileBody(
         kind: 'init',
         sections: [
             ...prefixSections,
-            ...sections.map((s) => ({ id: s.id, headingMarkdown: s.headingMarkdown })),
+            ...sections.map((s) => ({
+                id: s.id,
+                headingMarkdown: s.headingMarkdown,
+                range: s.unit.range,
+            })),
         ],
     });
 
