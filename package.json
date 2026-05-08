@@ -120,10 +120,14 @@
     }
   },
   "scripts": {
-    "compile": "npm run check-types && node esbuild.js",
-    "compile:prod": "npm run check-types && node esbuild.js --production",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "compile:prod": "npm run check-types && npm run lint && node esbuild.js --production",
     "watch": "node esbuild.js --watch",
     "check-types": "tsc --noEmit -p ./",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "vscode:prepublish": "npm run compile:prod",
     "package": "vsce package"
   },
@@ -133,7 +137,10 @@
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.24.0",
-    "typescript": "^5.5.0"
+    "eslint": "^9.10.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.5.0",
+    "vitest": "^2.1.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
