@@ -41,6 +41,16 @@
         "command": "codeNarration.setApiKey",
         "title": "Set Anthropic API Key",
         "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.pickModel",
+        "title": "Pick Model",
+        "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.clearCache",
+        "title": "Clear Cache",
+        "category": "Code Narration"
       }
     ],
     "menus": {
