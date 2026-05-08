@@ -2,7 +2,7 @@
   "name": "code-narration",
   "displayName": "Code Narration",
   "description": "LLM-powered narration of code and diffs in a side pane.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "gudge",
   "engines": {
     "vscode": "^1.95.0"
@@ -24,14 +24,18 @@
         "command": "codeNarration.reveal",
         "title": "Reveal Code Location",
         "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.setApiKey",
+        "title": "Set Anthropic API Key",
+        "category": "Code Narration"
       }
     ],
     "menus": {
       "editor/title": [
         {
           "command": "codeNarration.open",
-          "group": "navigation",
-          "when": "editorIsOpen"
+          "group": "navigation"
         }
       ],
       "commandPalette": [
@@ -40,6 +44,37 @@
           "when": "false"
         }
       ]
+    },
+    "configuration": {
+      "title": "Code Narration",
+      "properties": {
+        "codeNarration.provider": {
+          "type": "string",
+          "enum": ["vscodeLm", "anthropic"],
+          "default": "vscodeLm",
+          "description": "Which language model provider to use. 'vscodeLm' uses the built-in VS Code Language Model API (requires GitHub Copilot). 'anthropic' calls the Anthropic API directly using a key stored in SecretStorage."
+        },
+        "codeNarration.vscodeLm.modelFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model family for the VS Code LM provider (e.g. 'gpt-4o', 'claude-sonnet-4'). Empty picks the first available model."
+        },
+        "codeNarration.anthropic.model": {
+          "type": "string",
+          "default": "claude-sonnet-4-6",
+          "description": "Anthropic model ID. Examples: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5-20251001."
+        },
+        "codeNarration.diffBase": {
+          "type": "string",
+          "default": "HEAD",
+          "description": "Git ref to diff against in diff narration mode (used in phase 4)."
+        },
+        "codeNarration.narrateOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-narrate the file when it is saved, if the narration pane is open and showing that file."
+        }
+      }
     }
   },
   "scripts": {
@@ -54,6 +89,7 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
     "markdown-it": "^14.1.0"
   }
 }
