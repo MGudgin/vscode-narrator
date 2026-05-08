@@ -124,7 +124,8 @@ async function runNarration(
     panel.webview.html = renderShell(panel.webview, shortName(target.uri), bannerLabel);
     panel.reveal(vscode.ViewColumn.Beside, true);
 
-    const sectionState = new Map<string, { accumulated: string; lastRender: number; static: boolean }>();
+    type Status = 'queued' | 'streaming' | 'complete';
+    const sectionState = new Map<string, { accumulated: string; lastRender: number; static: boolean; status: Status }>();
     const activePanel = panel;
 
     const sink: NarrationSink = (event) => {
@@ -143,12 +144,15 @@ async function runNarration(
                     const bodyHtml = s.bodyMarkdown
                         ? renderMarkdownToHtml(fixupLinks(s.bodyMarkdown, target.uri))
                         : '';
+                    const isStatic = !!s.bodyMarkdown;
+                    const initialStatus: Status = isStatic ? 'complete' : 'queued';
                     sectionState.set(s.id, {
                         accumulated: s.bodyMarkdown ?? '',
                         lastRender: 0,
-                        static: !!s.bodyMarkdown,
+                        static: isStatic,
+                        status: initialStatus,
                     });
-                    return { id: s.id, headingHtml, bodyHtml };
+                    return { id: s.id, headingHtml, bodyHtml, status: initialStatus };
                 });
                 const labelWithCache = event.fromCache ? `${bannerLabel} • Cached` : bannerLabel;
                 void activePanel.webview.postMessage({
@@ -162,6 +166,14 @@ async function runNarration(
                 const state = sectionState.get(event.sectionId);
                 if (!state || state.static) return;
                 state.accumulated += event.text;
+                if (state.status === 'queued') {
+                    state.status = 'streaming';
+                    void activePanel.webview.postMessage({
+                        kind: 'sectionStatus',
+                        sectionId: event.sectionId,
+                        status: 'streaming',
+                    });
+                }
                 const now = Date.now();
                 if (now - state.lastRender < RENDER_THROTTLE_MS) return;
                 state.lastRender = now;
@@ -169,14 +181,44 @@ async function runNarration(
                 void activePanel.webview.postMessage({ kind: 'replace', sectionId: event.sectionId, bodyHtml: html });
                 break;
             }
-            case 'done': {
-                for (const [id, state] of sectionState) {
-                    if (state.static) continue;
+            case 'sectionDone': {
+                const state = sectionState.get(event.sectionId);
+                if (!state) return;
+                state.status = 'complete';
+                if (!state.static) {
                     const md = state.accumulated.trim().length > 0
                         ? state.accumulated
                         : '_(no narration produced for this section.)_';
                     const html = renderMarkdownToHtml(fixupLinks(md, target.uri));
-                    void activePanel.webview.postMessage({ kind: 'replace', sectionId: id, bodyHtml: html });
+                    void activePanel.webview.postMessage({
+                        kind: 'replace',
+                        sectionId: event.sectionId,
+                        bodyHtml: html,
+                    });
+                }
+                void activePanel.webview.postMessage({
+                    kind: 'sectionStatus',
+                    sectionId: event.sectionId,
+                    status: 'complete',
+                });
+                break;
+            }
+            case 'done': {
+                for (const [id, state] of sectionState) {
+                    if (state.status === 'complete') continue;
+                    if (!state.static) {
+                        const md = state.accumulated.trim().length > 0
+                            ? state.accumulated
+                            : '_(no narration produced for this section.)_';
+                        const html = renderMarkdownToHtml(fixupLinks(md, target.uri));
+                        void activePanel.webview.postMessage({ kind: 'replace', sectionId: id, bodyHtml: html });
+                    }
+                    state.status = 'complete';
+                    void activePanel.webview.postMessage({
+                        kind: 'sectionStatus',
+                        sectionId: id,
+                        status: 'complete',
+                    });
                 }
                 break;
             }

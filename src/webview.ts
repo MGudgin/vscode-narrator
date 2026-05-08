@@ -60,6 +60,27 @@ section .body:empty::before {
   color: var(--vscode-descriptionForeground);
   font-style: italic;
 }
+section > h2::after {
+  content: '●';
+  display: inline-block;
+  margin-left: 0.55em;
+  font-size: 0.7em;
+  vertical-align: middle;
+  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+  transition: color 0.25s ease;
+}
+section[data-status="streaming"] > h2::after {
+  color: var(--vscode-charts-yellow, #f5a623);
+  animation: cn-pulse 1.2s ease-in-out infinite;
+}
+section[data-status="complete"] > h2::after {
+  color: var(--vscode-charts-green, #4caf50);
+  animation: none;
+}
+@keyframes cn-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
 `;
 
 export function renderShell(webview: vscode.Webview, fileLabel: string, bannerLabel?: string): string {
@@ -95,7 +116,8 @@ ${banner(bannerLabel)}
         if (lbl) lbl.textContent = bannerLabel;
       }
       content.innerHTML = sections.map(function (s) {
-        return '<section data-id="' + s.id + '">'
+        const status = s.status || 'queued';
+        return '<section data-id="' + s.id + '" data-status="' + status + '">'
           + (s.headingHtml || '')
           + '<div class="body" id="body-' + s.id + '">' + (s.bodyHtml || '') + '</div>'
           + '</section>';
@@ -104,6 +126,10 @@ ${banner(bannerLabel)}
     function replace(id, html) {
       const el = document.getElementById('body-' + id);
       if (el) el.innerHTML = html;
+    }
+    function setStatus(id, status) {
+      const el = document.querySelector('section[data-id="' + id + '"]');
+      if (el) el.setAttribute('data-status', status);
     }
     function highlight(id) {
       const el = document.querySelector('section[data-id="' + id + '"]');
@@ -118,6 +144,7 @@ ${banner(bannerLabel)}
       if (!msg) return;
       if (msg.kind === 'reset') reset(msg.sections, msg.bannerLabel);
       else if (msg.kind === 'replace') replace(msg.sectionId, msg.bodyHtml);
+      else if (msg.kind === 'sectionStatus') setStatus(msg.sectionId, msg.status);
       else if (msg.kind === 'highlight') highlight(msg.sectionId);
     });
   })();
