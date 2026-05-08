@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { NarrationUnit } from './symbols';
 
 export const SYSTEM_PROMPT = `You are a code narrator. Given a source file, produce a clear narration in GitHub-flavored markdown for a developer reading the code on the left.
 
@@ -13,10 +14,39 @@ Output rules:
 - Use inline backticks for symbol names. Do NOT emit fenced code blocks; the reader sees the source on the left.
 - Begin your output with the first heading. No preamble, no closing remarks.`;
 
+export const SYMBOL_SYSTEM_PROMPT = `You are narrating one section of a source file for a developer reading the code on the left.
+
+Output format:
+- First line MUST be: Title: <a short human-readable section title>
+- Then a blank line.
+- Then 2-5 sentences in plain prose: what this section does, why it exists, any non-obvious behavior or invariants.
+- Use inline backticks for symbol names. Do NOT emit fenced code blocks; the reader sees the source on the left.
+- For inline references to specific lines, use markdown links of the form [text](narrate://lines/L<n>) or [text](narrate://lines/L<start>-L<end>). Use the line numbers shown in the leftmost column of the source.
+- Output nothing else: no preamble, no closing remarks, no headings.`;
+
 export function buildUserPrompt(doc: vscode.TextDocument): string {
     const path = vscode.workspace.asRelativePath(doc.uri);
     const numbered = numberLines(doc.getText());
     return `File: ${path}\nLanguage: ${doc.languageId}\n\nSource:\n${numbered}`;
+}
+
+export function buildSymbolUserPrompt(unit: NarrationUnit, doc: vscode.TextDocument): string {
+    const path = vscode.workspace.asRelativePath(doc.uri);
+    const numbered = numberLinesInRange(doc, unit.range);
+    const header = unit.kind === 'symbol'
+        ? `Section: ${unit.name}${unit.detail ? ` — ${unit.detail}` : ''}`
+        : `Section: ${unit.name} (file region — imports, module-level code, etc.)`;
+    return `File: ${path}\nLanguage: ${doc.languageId}\n${header}\n\nSource:\n${numbered}`;
+}
+
+export function parseSectionResponse(text: string, fallbackTitle: string): { title: string; body: string } {
+    const trimmed = text.trim();
+    const titleMatch = trimmed.match(/^Title:\s*(.+?)\s*$/m);
+    if (titleMatch && trimmed.indexOf(titleMatch[0]) === 0) {
+        const body = trimmed.slice(titleMatch[0].length).replace(/^\s+/, '');
+        return { title: titleMatch[1], body };
+    }
+    return { title: fallbackTitle, body: trimmed };
 }
 
 function numberLines(text: string): string {
@@ -25,6 +55,17 @@ function numberLines(text: string): string {
     return lines
         .map((line, i) => `${String(i + 1).padStart(width)}│ ${line}`)
         .join('\n');
+}
+
+function numberLinesInRange(doc: vscode.TextDocument, range: vscode.Range): string {
+    const startLine = range.start.line;
+    const endLine = range.end.line;
+    const width = String(endLine + 1).length;
+    const out: string[] = [];
+    for (let i = startLine; i <= endLine; i++) {
+        out.push(`${String(i + 1).padStart(width)}│ ${doc.lineAt(i).text}`);
+    }
+    return out.join('\n');
 }
 
 export function fixupLinks(markdown: string, docUri: vscode.Uri): string {
