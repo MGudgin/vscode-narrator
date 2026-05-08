@@ -2,7 +2,7 @@
 
 LLM-powered narration of source files and diffs, rendered in a side pane in VS Code.
 
-The extension splits a file into top-level symbols, fans out parallel calls to a language model, and streams the resulting markdown narration into a webview beside the editor. Section headings are deep links into the source. Diff mode narrates only what changed vs a configurable git ref.
+The extension splits a file into its symbols (top-level by default; recursive on opt-in), fans out parallel calls to a language model, and streams each section's markdown narration into a webview beside the editor. Section headings are deep links into the source, and a per-section status dot tracks each call's progress. Diff mode narrates only what changed vs a configurable git ref.
 
 ## Install (from VSIX)
 
@@ -12,7 +12,7 @@ The extension splits a file into top-level symbols, fans out parallel calls to a
 
 ## Pick a model
 
-The default provider is VS Code's built-in Language Model API, which requires GitHub Copilot to be installed (any subscription level — the extension just borrows the model). If you don't have Copilot, switch to Anthropic:
+The default provider is VS Code's built-in Language Model API, which requires GitHub Copilot to be installed and active. If you don't have Copilot, switch to Anthropic:
 
 1. **Command Palette** → **Code Narration: Set Anthropic API Key** → paste your `sk-ant-...` key. Stored in SecretStorage.
 2. **Command Palette** → **Code Narration: Pick Model** → choose Sonnet 4.6 (default), Opus 4.7, or Haiku 4.5.
@@ -29,8 +29,13 @@ You can also edit settings directly:
 - **Open Diff Narration** — the git-compare icon (or **Code Narration: Open Diff Narration**) narrates only what changed in the active file vs `codeNarration.diffBase` (default `HEAD`).
 - **Click a section heading** in the narration pane to jump the editor to that range.
 - **Cursor sync**: moving the cursor in the editor highlights the matching section in the narration pane.
-- **Refresh** link in the narration banner — re-runs and bypasses the cache.
 - **On save**: if the narrated file is saved, the narration re-runs (debounced). Toggle with `codeNarration.narrateOnSave`.
+
+### What you'll see
+
+- **Per-section status dot** next to each heading: grey while waiting for a worker, amber and pulsing while chunks stream in, green once the section is complete. Diff mode shows a single dot at the top of the pane in the same colour scheme.
+- **Streaming bodies**: each section's prose fills in as the model produces it; sections in the symbol fan-out complete independently and out of order.
+- **Banner** at the top of the pane shows the active target (`Full file` or `Diff vs <ref>`) and a **↻ Refresh** link that re-runs while bypassing the cache. A `• Cached` suffix appears when the result came from cache.
 
 ## Settings
 
@@ -41,6 +46,8 @@ You can also edit settings directly:
 | `codeNarration.anthropic.model` | `claude-sonnet-4-6` | Any Anthropic model id |
 | `codeNarration.diffBase` | `HEAD` | Git ref for diff mode |
 | `codeNarration.narrateOnSave` | `true` | Re-narrate after save |
+| `codeNarration.symbolConcurrency` | `4` | Max parallel LLM calls during symbol-aware fan-out (1–16) |
+| `codeNarration.recurseSymbols` | `false` | Narrate child symbols (e.g. methods inside a class) as their own sections |
 
 ## Commands
 
@@ -57,6 +64,17 @@ You can also edit settings directly:
 
 - The cache is keyed by `(target, content, provider, model, prompt-version)` and lives in workspaceState; switching models or editing prompt files invalidates entries naturally.
 - All `command:` URIs in the narration are restricted to a `codeNarration.reveal` handler that jumps the editor; nothing else can be invoked from generated content.
+- Transient stream errors (network blips, rate limits) are retried per section with exponential backoff before failing.
+
+## Building from source
+
+```bash
+npm install
+npm test          # vitest unit tests
+npm run lint      # eslint
+npm run compile   # type-check + lint + esbuild bundle
+npm run package   # produces code-narration-<version>.vsix
+```
 
 ## License
 
