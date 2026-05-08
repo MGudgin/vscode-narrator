@@ -1,9 +1,15 @@
 .vscode/**
 .vscode-test/**
 src/**
+node_modules/**
 .gitignore
 .git/**
 **/tsconfig.json
 **/*.map
 **/*.ts
-node_modules/.cache/**
+esbuild.js
+.git-commit-msg.tmp
+.claude/**
+.eslintrc*
+**/.eslintignore
+**/.DS_Store

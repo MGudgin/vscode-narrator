@@ -2,8 +2,10 @@
   "name": "code-narration",
   "displayName": "Code Narration",
   "description": "LLM-powered narration of code and diffs in a side pane.",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "publisher": "gudge",
+  "license": "MIT",
+  "icon": "icon.png",
   "engines": {
     "vscode": "^1.95.0"
   },
@@ -118,14 +120,19 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile"
+    "compile": "npm run check-types && node esbuild.js",
+    "compile:prod": "npm run check-types && node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "check-types": "tsc --noEmit -p ./",
+    "vscode:prepublish": "npm run compile:prod",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.5.0"
   },
   "dependencies": {
