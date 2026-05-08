@@ -1,0 +1,82 @@
+import { describe, test, expect, beforeEach } from 'vitest';
+import * as vscode from 'vscode';
+import { NarrationCache, fileKey, diffKey } from './cache';
+
+class MemoryMemento implements vscode.Memento {
+    private store = new Map<string, unknown>();
+    keys(): readonly string[] { return Array.from(this.store.keys()); }
+    get<T>(key: string): T | undefined;
+    get<T>(key: string, defaultValue: T): T;
+    get<T>(key: string, defaultValue?: T): T | undefined {
+        return this.store.has(key) ? (this.store.get(key) as T) : (defaultValue as T | undefined);
+    }
+    async update(key: string, value: unknown): Promise<void> {
+        if (value === undefined) {
+            this.store.delete(key);
+        } else {
+            this.store.set(key, value);
+        }
+    }
+    setKeysForSync(_keys: readonly string[]): void {}
+}
+
+describe('NarrationCache', () => {
+    let memento: MemoryMemento;
+    let cache: NarrationCache;
+
+    beforeEach(() => {
+        memento = new MemoryMemento();
+        cache = new NarrationCache(memento);
+    });
+
+    test('round-trips a value', async () => {
+        await cache.set('k1', 'v1');
+        expect(await cache.get('k1')).toBe('v1');
+    });
+
+    test('returns undefined for missing keys', async () => {
+        expect(await cache.get('nope')).toBeUndefined();
+    });
+
+    test('overwrites existing keys', async () => {
+        await cache.set('k1', 'first');
+        await cache.set('k1', 'second');
+        expect(await cache.get('k1')).toBe('second');
+    });
+
+    test('clearAll wipes every entry', async () => {
+        await cache.set('a', '1');
+        await cache.set('b', '2');
+        await cache.clearAll();
+        expect(await cache.get('a')).toBeUndefined();
+        expect(await cache.get('b')).toBeUndefined();
+    });
+});
+
+describe('cache key builders', () => {
+    const uri = vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri;
+    const provider = { kind: 'anthropic', model: 'claude-sonnet-4-6' };
+
+    test('fileKey is deterministic for identical inputs', () => {
+        expect(fileKey(uri, 'content', provider)).toBe(fileKey(uri, 'content', provider));
+    });
+
+    test('fileKey changes when content changes', () => {
+        expect(fileKey(uri, 'a', provider)).not.toBe(fileKey(uri, 'b', provider));
+    });
+
+    test('fileKey changes when model changes', () => {
+        const other = { kind: 'anthropic', model: 'claude-opus-4-7' };
+        expect(fileKey(uri, 'content', provider)).not.toBe(fileKey(uri, 'content', other));
+    });
+
+    test('fileKey and diffKey for the same file are distinct', () => {
+        expect(fileKey(uri, 'content', provider))
+            .not.toBe(diffKey(uri, 'content', 'HEAD', provider));
+    });
+
+    test('diffKey changes when base ref changes', () => {
+        expect(diffKey(uri, 'd', 'HEAD', provider))
+            .not.toBe(diffKey(uri, 'd', 'origin/main', provider));
+    });
+});
