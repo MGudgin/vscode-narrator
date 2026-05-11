@@ -44,6 +44,24 @@ blockquote {
 .banner-label { color: var(--vscode-descriptionForeground); }
 .banner-actions { margin-left: auto; }
 .banner-actions a { margin-left: 0.75em; }
+.banner-dot {
+  display: inline-block;
+  margin-right: 0.5em;
+  font-size: 0.85em;
+  line-height: 1;
+  vertical-align: middle;
+  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+  transition: color 0.25s ease;
+}
+.banner-dot[data-status="hidden"] { display: none; }
+.banner-dot[data-status="streaming"] {
+  color: var(--vscode-charts-yellow, #f5a623);
+  animation: cn-pulse 1.2s ease-in-out infinite;
+}
+.banner-dot[data-status="complete"] {
+  color: var(--vscode-charts-green, #4caf50);
+  animation: none;
+}
 .status { color: var(--vscode-descriptionForeground); font-style: italic; }
 .error { color: var(--vscode-errorForeground); }
 section {
@@ -150,6 +168,10 @@ ${banner(bannerLabel)}
       const el = document.querySelector('section[data-id="' + id + '"]');
       if (el) el.setAttribute('data-status', status);
     }
+    function setBannerStatus(status) {
+      const el = document.getElementById('banner-dot');
+      if (el) el.setAttribute('data-status', status);
+    }
     function highlight(id) {
       const el = document.querySelector('section[data-id="' + id + '"]');
       if (!el) return;
@@ -164,6 +186,7 @@ ${banner(bannerLabel)}
       if (msg.kind === 'reset') reset(msg.sections, msg.bannerLabel);
       else if (msg.kind === 'replace') replace(msg.sectionId, msg.bodyHtml);
       else if (msg.kind === 'sectionStatus') setStatus(msg.sectionId, msg.status);
+      else if (msg.kind === 'bannerStatus') setBannerStatus(msg.status);
       else if (msg.kind === 'highlight') highlight(msg.sectionId);
     });
   })();
@@ -200,10 +223,33 @@ export function renderMarkdownToHtml(markdown: string): string {
     return md.render(markdown);
 }
 
+export type SectionStatus = 'queued' | 'streaming' | 'complete';
+export type BannerStatus = 'hidden' | 'streaming' | 'complete';
+
+/**
+ * Aggregates the per-section narration statuses into a single banner-level
+ * status.
+ *
+ * - `hidden` when there are no sections (no active narration).
+ * - `streaming` when any section is still queued or streaming.
+ * - `complete` when every section has finished.
+ */
+export function aggregateBannerStatus(statuses: Iterable<SectionStatus>): BannerStatus {
+    let count = 0;
+    let anyPending = false;
+    for (const s of statuses) {
+        count++;
+        if (s !== 'complete') anyPending = true;
+    }
+    if (count === 0) return 'hidden';
+    return anyPending ? 'streaming' : 'complete';
+}
+
 function banner(label?: string): string {
     if (!label) return '';
     const refresh = `command:codeNarration.refresh`;
     return `<div class="banner">
+  <span class="banner-dot" id="banner-dot" data-status="hidden" title="Narration progress">●</span>
   <span class="banner-label" id="banner-label">${escapeHtml(label)}</span>
   <span class="banner-actions"><a href="${refresh}" title="Re-run narration">↻ Refresh</a></span>
 </div>`;
