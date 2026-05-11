@@ -8,7 +8,7 @@ import {
     MissingApiKeyError,
 } from './llm/index';
 import { narrateDocument, narrateDiff, NarrationSink } from './narrate';
-import { renderShell, renderError, renderMarkdownToHtml } from './webview';
+import { renderShell, renderError, renderMarkdownToHtml, aggregateBannerStatus } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel } from './target';
 import { NarrationCache } from './cache';
 import { fixupLinks } from './prompt';
@@ -127,6 +127,15 @@ async function runNarration(
     type Status = 'queued' | 'streaming' | 'complete';
     const sectionState = new Map<string, { accumulated: string; lastRender: number; static: boolean; status: Status }>();
     const activePanel = panel;
+    let lastBannerStatus: 'hidden' | 'streaming' | 'complete' = 'hidden';
+    const syncBannerStatus = (): void => {
+        const next = aggregateBannerStatus(
+            Array.from(sectionState.values(), (s) => s.status),
+        );
+        if (next === lastBannerStatus) return;
+        lastBannerStatus = next;
+        void activePanel.webview.postMessage({ kind: 'bannerStatus', status: next });
+    };
 
     const sink: NarrationSink = (event) => {
         if (token.isCancellationRequested) return;
@@ -160,6 +169,8 @@ async function runNarration(
                     sections: sectionsForWebview,
                     bannerLabel: labelWithCache,
                 });
+                lastBannerStatus = 'hidden';
+                syncBannerStatus();
                 break;
             }
             case 'chunk': {
@@ -173,6 +184,7 @@ async function runNarration(
                         sectionId: event.sectionId,
                         status: 'streaming',
                     });
+                    syncBannerStatus();
                 }
                 const now = Date.now();
                 if (now - state.lastRender < RENDER_THROTTLE_MS) return;
@@ -197,6 +209,7 @@ async function runNarration(
                     sectionId: event.sectionId,
                     status: 'streaming',
                 });
+                syncBannerStatus();
                 break;
             }
             case 'sectionDone': {
@@ -219,6 +232,7 @@ async function runNarration(
                     sectionId: event.sectionId,
                     status: 'complete',
                 });
+                syncBannerStatus();
                 break;
             }
             case 'done': {
@@ -238,6 +252,7 @@ async function runNarration(
                         status: 'complete',
                     });
                 }
+                syncBannerStatus();
                 break;
             }
         }
