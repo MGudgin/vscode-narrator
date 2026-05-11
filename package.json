@@ -134,6 +134,12 @@
           "default": "auto",
           "scope": "language-overridable",
           "description": "Whether to narrate child symbols as their own sections. Legacy boolean values (true/false) are still honored as 'always'/'never'."
+        },
+        "codeNarration.maxPromptTokens": {
+          "type": "integer",
+          "default": 50000,
+          "minimum": 1000,
+          "description": "Token budget for a single LLM prompt body. When a symbol's prompt would exceed this, the symbol is split into overlapping line-range sub-chunks, each narrated independently, and the results are merged. Lower this for cheaper calls or to fit smaller context windows; raise it if your model has plenty of context and you want fewer cuts."
         }
       }
     }

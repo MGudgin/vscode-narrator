@@ -128,6 +128,33 @@ export function buildSymbolUserPrompt(unit: NarrationUnit, doc: vscode.TextDocum
     return `File: ${path}\nLanguage: ${doc.languageId}\n${header}\n\nSource:\n${numbered}`;
 }
 
+/**
+ * Same as `buildSymbolUserPrompt` but for a sub-chunk of a single oversized
+ * unit. Carries 1-based line range annotation in the header so the model
+ * knows it's narrating part of a larger symbol — important for keeping the
+ * tone consistent across chunks and avoiding "this looks like the start of
+ * a function" misinterpretation when the chunk actually starts mid-body.
+ */
+export function buildSymbolUserPromptForRange(
+    unit: NarrationUnit,
+    doc: vscode.TextDocument,
+    startLine: number,
+    endLine: number,
+): string {
+    const path = vscode.workspace.asRelativePath(doc.uri);
+    const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).range.end.character);
+    const numbered = numberLinesInRange(doc, range);
+    const baseHeader = unit.kind === 'symbol'
+        ? `Section: ${unit.name}${unit.detail ? ` — ${unit.detail}` : ''}`
+        : `Section: ${unit.name} (file region — imports, module-level code, etc.)`;
+    const totalStart = unit.range.start.line + 1;
+    const totalEnd = unit.range.end.line + 1;
+    const chunkStart = startLine + 1;
+    const chunkEnd = endLine + 1;
+    const chunkNote = `Chunk lines L${chunkStart}-L${chunkEnd} of full section L${totalStart}-L${totalEnd}. This is one sub-chunk of an oversized section; narrate only what is in this chunk.`;
+    return `File: ${path}\nLanguage: ${doc.languageId}\n${baseHeader}\n${chunkNote}\n\nSource:\n${numbered}`;
+}
+
 function relativePath(root: vscode.Uri, file: vscode.Uri): string {
     const rootPath = (root.fsPath || root.path).replace(/\\/g, '/').replace(/\/$/, '');
     const filePath = (file.fsPath || file.path).replace(/\\/g, '/');

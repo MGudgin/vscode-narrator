@@ -11,12 +11,20 @@ import {
     TREE_FILE_DIFF_SYSTEM_PROMPT,
     buildUserPrompt,
     buildSymbolUserPrompt,
+    buildSymbolUserPromptForRange,
     buildDiffUserPrompt,
     buildTreeSummaryPrompt,
     buildTreeFileDiffPrompt,
     fixupLinks,
 } from './prompt';
 import { withTransientRetry } from './retry';
+import {
+    DEFAULT_MAX_PROMPT_TOKENS,
+    SubChunkRange,
+    formatLineRangeLabel,
+    shouldSubChunk,
+    splitLineRange,
+} from './chunking';
 
 const DEFAULT_SYMBOL_CONCURRENCY = 4;
 
@@ -24,6 +32,12 @@ function readSymbolConcurrency(): number {
     const value = vscode.workspace.getConfiguration('codeNarration').get<number>('symbolConcurrency', DEFAULT_SYMBOL_CONCURRENCY);
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return DEFAULT_SYMBOL_CONCURRENCY;
     return Math.min(16, Math.floor(value));
+}
+
+function readMaxPromptTokens(): number {
+    const value = vscode.workspace.getConfiguration('codeNarration').get<number>('maxPromptTokens', DEFAULT_MAX_PROMPT_TOKENS);
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 1000) return DEFAULT_MAX_PROMPT_TOKENS;
+    return Math.floor(value);
 }
 
 export interface SectionInit {
@@ -51,6 +65,11 @@ export interface NarrationOptions {
     fetchDiff?: (uri: vscode.Uri, baseRef: string) => Promise<DiffResult>;
     fetchTreeDiff?: (repoRoot: vscode.Uri, baseRef: string) => Promise<TreeDiffResult>;
     concurrency?: number;
+    // Token budget for a single prompt body. When a unit's prompt would
+    // exceed this, it is sub-chunked and the per-chunk narrations are
+    // merged. Falls back to `codeNarration.maxPromptTokens` setting, then
+    // `DEFAULT_MAX_PROMPT_TOKENS`.
+    maxPromptTokens?: number;
 }
 
 export async function narrateDocument(
@@ -371,28 +390,12 @@ async function narrateFileBody(
     });
 
     const concurrency = options.concurrency ?? readSymbolConcurrency();
+    const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
     let anyFailure = false;
     await mapWithConcurrency(sections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;
         try {
-            await withTransientRetry(
-                async (attempt) => {
-                    if (attempt > 0) {
-                        sec.accumulated = '';
-                        sink({ kind: 'sectionReset', sectionId: sec.id });
-                    }
-                    for await (const chunk of provider.stream(
-                        SYMBOL_SYSTEM_PROMPT,
-                        buildSymbolUserPrompt(sec.unit, doc),
-                        token,
-                    )) {
-                        if (token.isCancellationRequested) return;
-                        sec.accumulated += chunk;
-                        sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
-                    }
-                },
-                { isCancelled: () => token.isCancellationRequested },
-            );
+            await narrateSection(sec, doc, provider, token, sink, maxPromptTokens);
         } catch (err) {
             if (token.isCancellationRequested) return;
             anyFailure = true;
@@ -418,6 +421,138 @@ async function narrateFileBody(
         await options.cache.set(key, finalMd);
     }
     sink({ kind: 'done' });
+}
+
+interface Section {
+    id: string;
+    unit: NarrationUnit;
+    headingMarkdown: string;
+    accumulated: string;
+}
+
+/**
+ * Narrate a single section, sub-chunking the underlying source when its
+ * prompt would exceed the configured token budget.
+ *
+ * Below the budget: a single streaming call, identical to the pre-#19
+ * behavior — output streams directly into the section as it arrives.
+ *
+ * Above the budget: split the line range into overlapping sub-chunks (see
+ * `chunking.ts`), narrate each one sequentially, and concatenate the
+ * outputs with a level-3 line-range subheading between them. Sequential
+ * (not parallel) so the user sees the section fill in top-to-bottom in
+ * stream order, matching how the source reads. The cost of an extra
+ * narration pass is dwarfed by the cost of the chunks themselves, and the
+ * outer `mapWithConcurrency` is still parallelising across *sections*.
+ */
+async function narrateSection(
+    sec: Section,
+    doc: vscode.TextDocument,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+    sink: NarrationSink,
+    maxPromptTokens: number,
+): Promise<void> {
+    const fullPrompt = buildSymbolUserPrompt(sec.unit, doc);
+    if (!shouldSubChunk(fullPrompt, maxPromptTokens)) {
+        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt);
+        return;
+    }
+
+    // Determine the line range and total char count, then split.
+    const startLine = sec.unit.range.start.line;
+    const endLine = sec.unit.range.end.line;
+    const ranges = splitLineRange(startLine, endLine, fullPrompt.length, {
+        maxPromptTokens,
+    });
+
+    // Defensive: if splitting failed to produce more than one chunk
+    // (degenerate input), fall back to a single call rather than blocking.
+    if (ranges.length <= 1) {
+        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt);
+        return;
+    }
+
+    for (let i = 0; i < ranges.length; i++) {
+        if (token.isCancellationRequested) return;
+        const range = ranges[i];
+        await streamChunkIntoSection(sec, doc, provider, token, sink, range, i, ranges.length);
+    }
+}
+
+/**
+ * Stream a single chunk of an oversized section into the section's body.
+ * Emits a level-3 subheading marking the chunk's 1-based line range before
+ * the chunk's narration so the user can correlate output back to the
+ * source.
+ */
+async function streamChunkIntoSection(
+    sec: Section,
+    doc: vscode.TextDocument,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+    sink: NarrationSink,
+    range: SubChunkRange,
+    chunkIndex: number,
+    chunkCount: number,
+): Promise<void> {
+    const label = formatLineRangeLabel(range);
+    // Spacing between chunks: leading double-newline for any chunk after
+    // the first. Keeps the markdown well-formed when chunks concatenate.
+    const subheading = `${chunkIndex > 0 ? '\n\n' : ''}### Lines [${label}](narrate://lines/${label}) (chunk ${chunkIndex + 1}/${chunkCount})\n\n`;
+    sec.accumulated += subheading;
+    sink({ kind: 'chunk', sectionId: sec.id, text: subheading });
+
+    const userPrompt = buildSymbolUserPromptForRange(sec.unit, doc, range.startLine, range.endLine);
+
+    // Track the index at which this chunk's text starts in `sec.accumulated`
+    // so that a retry can trim it back without nuking earlier chunks.
+    const chunkStartOffset = sec.accumulated.length;
+
+    await withTransientRetry(
+        async (attempt) => {
+            if (attempt > 0) {
+                // On retry, trim back to the start of *this* chunk's body
+                // and re-stream just this chunk. Earlier chunks are
+                // preserved. The whole section is then reset and re-played
+                // via `sectionReset` so the webview shows the truncation
+                // and re-stream.
+                sec.accumulated = sec.accumulated.slice(0, chunkStartOffset);
+                sink({ kind: 'sectionReset', sectionId: sec.id });
+                sink({ kind: 'chunk', sectionId: sec.id, text: sec.accumulated });
+            }
+            for await (const chunk of provider.stream(SYMBOL_SYSTEM_PROMPT, userPrompt, token)) {
+                if (token.isCancellationRequested) return;
+                sec.accumulated += chunk;
+                sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
+            }
+        },
+        { isCancelled: () => token.isCancellationRequested },
+    );
+}
+
+async function streamIntoSection(
+    sec: Section,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+    sink: NarrationSink,
+    systemPrompt: string,
+    userPrompt: string,
+): Promise<void> {
+    await withTransientRetry(
+        async (attempt) => {
+            if (attempt > 0) {
+                sec.accumulated = '';
+                sink({ kind: 'sectionReset', sectionId: sec.id });
+            }
+            for await (const chunk of provider.stream(systemPrompt, userPrompt, token)) {
+                if (token.isCancellationRequested) return;
+                sec.accumulated += chunk;
+                sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
+            }
+        },
+        { isCancelled: () => token.isCancellationRequested },
+    );
 }
 
 function buildHeading(docUri: vscode.Uri, unit: NarrationUnit, title: string): string {
