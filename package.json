@@ -29,6 +29,12 @@
         "icon": "$(git-compare)"
       },
       {
+        "command": "codeNarration.openTreeDiff",
+        "title": "Open Tree Diff Narration",
+        "category": "Code Narration",
+        "icon": "$(diff-multiple)"
+      },
+      {
         "command": "codeNarration.refresh",
         "title": "Refresh Narration",
         "category": "Code Narration",
@@ -66,6 +72,12 @@
           "command": "codeNarration.openDiff",
           "group": "navigation@2",
           "when": "activeWebviewPanelId != 'codeNarration'"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "codeNarration.openTreeDiff",
+          "group": "navigation"
         }
       ],
       "commandPalette": [

@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { ProviderInfo } from './llm/index';
 
-export const PROMPT_VERSION = 1;
+export const PROMPT_VERSION = 2;
 const MAX_ENTRIES = 50;
 const STATE_KEY = 'codeNarration.cache.v1';
+const KEY_SEPARATOR = '\x1f';
 
 interface CacheEntry {
     key: string;
@@ -57,6 +58,10 @@ export function diffKey(uri: vscode.Uri, unifiedDiff: string, baseRef: string, i
     return hashKey(['diff', uri.toString(), unifiedDiff, baseRef, info.kind, info.model, String(PROMPT_VERSION)]);
 }
 
+export function treeDiffKey(repoRoot: vscode.Uri, combinedDiff: string, baseRef: string, info: ProviderInfo): string {
+    return hashKey(['tree', repoRoot.toString(), combinedDiff, baseRef, info.kind, info.model, String(PROMPT_VERSION)]);
+}
+
 function hashKey(parts: string[]): string {
-    return crypto.createHash('sha256').update(parts.join('\0')).digest('hex');
+    return crypto.createHash('sha256').update(parts.join(KEY_SEPARATOR)).digest('hex');
 }
