@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import { ProviderInfo } from './llm/index';
 
 export const PROMPT_VERSION = 2;
-const MAX_ENTRIES = 50;
+const MAX_ENTRIES = 200;
 const STATE_KEY = 'codeNarration.cache.v1';
 const KEY_SEPARATOR = '\x1f';
 
@@ -30,9 +30,16 @@ export class NarrationCache {
     }
 
     async set(key: string, markdown: string): Promise<void> {
+        return this.setMany([{ key, markdown }]);
+    }
+
+    async setMany(updates: { key: string; markdown: string }[]): Promise<void> {
+        if (updates.length === 0) return;
         try {
-            let entries = this.read().filter((e) => e.key !== key);
-            entries.push({ key, markdown, timestamp: Date.now() });
+            const incomingKeys = new Set(updates.map((u) => u.key));
+            const now = Date.now();
+            let entries = this.read().filter((e) => !incomingKeys.has(e.key));
+            for (const u of updates) entries.push({ key: u.key, markdown: u.markdown, timestamp: now });
             entries.sort((a, b) => b.timestamp - a.timestamp);
             if (entries.length > MAX_ENTRIES) entries = entries.slice(0, MAX_ENTRIES);
             await this.state.update(STATE_KEY, entries);
@@ -52,6 +59,25 @@ export class NarrationCache {
 
 export function fileKey(uri: vscode.Uri, content: string, info: ProviderInfo): string {
     return hashKey(['file', uri.toString(), content, info.kind, info.model, String(PROMPT_VERSION)]);
+}
+
+export function sectionKey(
+    uri: vscode.Uri,
+    unitName: string,
+    unitText: string,
+    maxPromptTokens: number,
+    info: ProviderInfo,
+): string {
+    return hashKey([
+        'section',
+        uri.toString(),
+        unitName,
+        unitText,
+        String(maxPromptTokens),
+        info.kind,
+        info.model,
+        String(PROMPT_VERSION),
+    ]);
 }
 
 export function diffKey(uri: vscode.Uri, unifiedDiff: string, baseRef: string, info: ProviderInfo): string {

@@ -1,6 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { NarrationCache, fileKey, diffKey, treeDiffKey } from './cache';
+import { NarrationCache, fileKey, sectionKey, diffKey, treeDiffKey } from './cache';
+
+const MAX_ENTRIES = 200;
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -69,29 +71,29 @@ describe('NarrationCache LRU eviction', () => {
         vi.restoreAllMocks();
     });
 
-    test('caps the store at 50 entries', async () => {
-        for (let i = 0; i < 60; i++) {
+    test(`caps the store at ${MAX_ENTRIES} entries`, async () => {
+        for (let i = 0; i < MAX_ENTRIES + 10; i++) {
             await cache.set(`k${i}`, `v${i}`);
         }
         const stored = memento.get<unknown[]>('codeNarration.cache.v1', []);
-        expect(stored).toHaveLength(50);
+        expect(stored).toHaveLength(MAX_ENTRIES);
     });
 
     test('evicts the oldest entries first when over capacity', async () => {
-        for (let i = 0; i < 51; i++) {
+        for (let i = 0; i < MAX_ENTRIES + 1; i++) {
             await cache.set(`k${i}`, `v${i}`);
         }
         // The first-set entry has the smallest timestamp, so it gets dropped.
         expect(await cache.get('k0')).toBeUndefined();
         // The most recently added entries remain.
-        expect(await cache.get('k50')).toBe('v50');
+        expect(await cache.get(`k${MAX_ENTRIES}`)).toBe(`v${MAX_ENTRIES}`);
         expect(await cache.get('k1')).toBe('v1');
     });
 
     test('get() refreshes the timestamp so a touched entry survives eviction', async () => {
         await cache.set('keep', 'kept-value');
-        // Fill another 49 entries so we are at exactly 50 with 'keep' as the oldest.
-        for (let i = 0; i < 49; i++) {
+        // Fill enough entries so we are at exactly MAX_ENTRIES with 'keep' as the oldest.
+        for (let i = 0; i < MAX_ENTRIES - 1; i++) {
             await cache.set(`fill${i}`, `v${i}`);
         }
         // Touch 'keep' to bump its timestamp ahead of the oldest fill entries.
@@ -101,6 +103,20 @@ describe('NarrationCache LRU eviction', () => {
         await cache.set('new2', 'n2');
         expect(await cache.get('keep')).toBe('kept-value');
         expect(await cache.get('fill0')).toBeUndefined();
+    });
+
+    test('setMany writes multiple entries atomically without losing any to RMW races', async () => {
+        const updates = Array.from({ length: 5 }, (_, i) => ({ key: `m${i}`, markdown: `v${i}` }));
+        await cache.setMany(updates);
+        for (let i = 0; i < 5; i++) {
+            expect(await cache.get(`m${i}`)).toBe(`v${i}`);
+        }
+    });
+
+    test('setMany() is a no-op for an empty update list', async () => {
+        await cache.set('pre', 'existing');
+        await cache.setMany([]);
+        expect(await cache.get('pre')).toBe('existing');
     });
 });
 
@@ -148,5 +164,32 @@ describe('cache key builders', () => {
         const repoRoot = vscode.Uri.parse('file:///foo/repo') as unknown as vscode.Uri;
         expect(treeDiffKey(repoRoot, 'd', 'HEAD', provider))
             .not.toBe(treeDiffKey(repoRoot, 'd', 'origin/main', provider));
+    });
+
+    test('sectionKey is deterministic for identical inputs', () => {
+        expect(sectionKey(uri, 'foo', 'body', 50000, provider))
+            .toBe(sectionKey(uri, 'foo', 'body', 50000, provider));
+    });
+
+    test('sectionKey changes when the unit text changes', () => {
+        expect(sectionKey(uri, 'foo', 'a', 50000, provider))
+            .not.toBe(sectionKey(uri, 'foo', 'b', 50000, provider));
+    });
+
+    test('sectionKey changes when the unit name changes', () => {
+        expect(sectionKey(uri, 'foo', 'body', 50000, provider))
+            .not.toBe(sectionKey(uri, 'bar', 'body', 50000, provider));
+    });
+
+    test('sectionKey changes when maxPromptTokens changes', () => {
+        // Sub-chunking shape depends on the prompt-token budget, so cached
+        // bodies are not interchangeable across different budgets.
+        expect(sectionKey(uri, 'foo', 'body', 5000, provider))
+            .not.toBe(sectionKey(uri, 'foo', 'body', 50000, provider));
+    });
+
+    test('sectionKey is distinct from fileKey for the same uri+text', () => {
+        expect(sectionKey(uri, 'foo', 'body', 50000, provider))
+            .not.toBe(fileKey(uri, 'body', provider));
     });
 });
