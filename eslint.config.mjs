@@ -19,7 +19,7 @@ export default tseslint.config(
         },
     },
     {
-        files: ['src/**/*.test.ts'],
+        files: ['src/**/*.test.ts', 'src/test/**/*.ts'],
         rules: {
             '@typescript-eslint/no-explicit-any': 'off',
             '@typescript-eslint/no-unused-vars': 'off',

@@ -36,3 +36,21 @@ jobs:
 
       - name: Build (esbuild bundle)
         run: node esbuild.js --production
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration tests
+        run: xvfb-run -a npm run test:integration

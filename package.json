@@ -92,7 +92,10 @@
       "properties": {
         "codeNarration.provider": {
           "type": "string",
-          "enum": ["vscodeLm", "anthropic"],
+          "enum": [
+            "vscodeLm",
+            "anthropic"
+          ],
           "default": "vscodeLm",
           "description": "Which language model provider to use. 'vscodeLm' uses the built-in VS Code Language Model API (requires GitHub Copilot). 'anthropic' calls the Anthropic API directly using a key stored in SecretStorage."
         },
@@ -125,7 +128,11 @@
         },
         "codeNarration.recurseSymbols": {
           "type": "string",
-          "enum": ["auto", "always", "never"],
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
           "enumDescriptions": [
             "Recurse into child symbols for container-heavy languages (C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++); stay top-level only for others.",
             "Always narrate each child symbol (e.g., methods inside a class) as its own section.",
@@ -153,16 +160,24 @@
     "lint:fix": "eslint src --fix",
     "test": "vitest run",
     "test:watch": "vitest",
+    "pretest:integration": "tsc -p ./tsconfig.test.json && node esbuild.js",
+    "test:integration": "vscode-test",
     "vscode:prepublish": "npm run compile:prod",
     "package": "vsce package"
   },
   "devDependencies": {
+    "@types/glob": "^9.0.0",
     "@types/markdown-it": "^14.1.2",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.95.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.25.0",
     "eslint": "^9.10.0",
+    "glob": "^13.0.6",
+    "mocha": "^11.7.5",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.5.0",
     "vitest": "^3.0.0"
