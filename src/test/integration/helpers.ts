@@ -73,6 +73,34 @@ export async function closeAllEditors(): Promise<void> {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 }
 
+/**
+ * Block until `vscode.executeDocumentSymbolProvider` returns at least one
+ * symbol for the given URI, or `timeoutMs` elapses. The TypeScript language
+ * server can be slow on the first request in a test run, especially after
+ * other extensions (e.g. vscode.git) have warmed up. Calling this before
+ * `codeNarration.open` ensures the narration path's symbol fetch succeeds
+ * rather than falling back to the whole-file path.
+ *
+ * Best-effort: does not throw on timeout — some tests legitimately expect
+ * no symbols (the fallback path), and the call-count assertions guard the
+ * real invariant.
+ */
+export async function warmupSymbols(uri: vscode.Uri, timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        try {
+            const result = await vscode.commands.executeCommand<unknown[] | undefined>(
+                'vscode.executeDocumentSymbolProvider',
+                uri,
+            );
+            if (Array.isArray(result) && result.length > 0) return;
+        } catch {
+            // Language server not ready — retry.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+}
+
 export function hasNarrationWebviewTab(): boolean {
     for (const group of vscode.window.tabGroups.all) {
         for (const tab of group.tabs) {
