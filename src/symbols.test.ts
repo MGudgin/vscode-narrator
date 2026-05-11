@@ -1,6 +1,13 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, afterEach } from 'vitest';
 import * as vscode from 'vscode';
-import { flattenSymbols, getNarrationUnits } from './symbols';
+import { flattenSymbols, getNarrationUnits, resolveRecurseSymbols } from './symbols';
+
+const vscodeMock = vscode as unknown as {
+    __setConfigInspect: (key: string, value: Record<string, unknown>) => void;
+    __resetConfig: () => void;
+};
+const __setConfigInspect = vscodeMock.__setConfigInspect;
+const __resetConfig = vscodeMock.__resetConfig;
 
 function sym(name: string, startLine: number, endLine: number, children: vscode.DocumentSymbol[] = []): vscode.DocumentSymbol {
     return {
@@ -13,10 +20,10 @@ function sym(name: string, startLine: number, endLine: number, children: vscode.
     } as unknown as vscode.DocumentSymbol;
 }
 
-function mockDoc(lines: string[]): vscode.TextDocument {
+function mockDoc(lines: string[], languageId: string = 'typescript'): vscode.TextDocument {
     return {
         uri: vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri,
-        languageId: 'typescript',
+        languageId,
         lineCount: lines.length,
         getText: (range?: vscode.Range): string => {
             if (!range) return lines.join('\n');
@@ -128,5 +135,62 @@ describe('getNarrationUnits', () => {
         const symbols = [sym('Foo', 0, 3, [sym('bar', 1, 1), sym('baz', 2, 2)])];
         const units = await getNarrationUnits(doc, { fetchSymbols: async () => symbols, recurse: false });
         expect(units.map((u) => u.name)).toEqual(['Foo']);
+    });
+});
+
+describe('resolveRecurseSymbols', () => {
+    afterEach(() => __resetConfig());
+
+    test('auto: recurses for container-heavy languages (csharp)', () => {
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+    });
+
+    test('auto: recurses for cpp', () => {
+        expect(resolveRecurseSymbols(mockDoc([''], 'cpp'))).toBe(true);
+    });
+
+    test('auto: top-level only for typescript', () => {
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(false);
+    });
+
+    test('auto: top-level only for python', () => {
+        expect(resolveRecurseSymbols(mockDoc([''], 'python'))).toBe(false);
+    });
+
+    test('"never" overrides csharp auto', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'never' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(false);
+    });
+
+    test('"always" overrides typescript auto', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'always' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(true);
+    });
+
+    test('explicit "auto" falls back to the language default', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'auto' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(false);
+    });
+
+    test('language-scoped value overrides global value', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'never', globalLanguageValue: 'always' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+    });
+
+    test('legacy boolean true is honored as "always"', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: true });
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(true);
+    });
+
+    test('legacy boolean false is honored as "never"', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: false });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(false);
+    });
+
+    test('unknown string falls back to language default', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'garbage' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(false);
     });
 });
