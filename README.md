@@ -48,6 +48,7 @@ You can also edit settings directly:
 | `codeNarration.narrateOnSave` | `true` | Re-narrate after save |
 | `codeNarration.symbolConcurrency` | `4` | Max parallel LLM calls during symbol-aware fan-out (1–16) |
 | `codeNarration.recurseSymbols` | `"auto"` | Narrate child symbols as their own sections. `"auto"` recurses for container-heavy languages and stays top-level for others; `"always"` forces recursion; `"never"` forces top-level only |
+| `codeNarration.maxPromptTokens` | `50000` | Token budget per prompt body; oversized symbols are sub-chunked and merged |
 
 `"auto"` (the default) recurses for languages whose top level is mostly namespaces and classes — C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++ — so methods, properties, and events each get their own section, and stays top-level only for everything else. Set the value globally or under a `[language]` scope to override. Legacy boolean values (`true`/`false`) are still honored as `"always"`/`"never"`.
 
@@ -67,6 +68,7 @@ You can also edit settings directly:
 - The cache is keyed by `(target, content, provider, model, prompt-version)` and lives in workspaceState; switching models or editing prompt files invalidates entries naturally.
 - All `command:` URIs in the narration are restricted to a `codeNarration.reveal` handler that jumps the editor; nothing else can be invoked from generated content.
 - Transient stream errors (network blips, rate limits) are retried per section with exponential backoff before failing.
+- Massive single symbols (thousands of lines, no nested structure) that would blow past the model's context window are split into overlapping line-range sub-chunks under `codeNarration.maxPromptTokens` (default 50 000), narrated independently, then merged into the section with line-range subheadings.
 
 ## Building from source
 
