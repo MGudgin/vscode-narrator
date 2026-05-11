@@ -180,6 +180,61 @@ describe('narrateDocument', () => {
         expect(events.some((e) => e.kind === 'chunk')).toBe(false);
     });
 
+    test('sub-chunks an oversized unit and merges the chunk narrations into one section', async () => {
+        // One symbol covering ~1000 lines of 200 chars each → ~50k tokens —
+        // forces sub-chunking when maxPromptTokens is set to 5_000.
+        const totalLines = 1000;
+        const lineText = 'x'.repeat(200);
+        const docText = Array.from({ length: totalLines }, () => lineText).join('\n');
+        const doc = mockDoc(docText);
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'huge', range: new vscode.Range(0, 0, totalLines - 1, lineText.length) },
+        ];
+        const { options } = makeOptions({
+            fetchUnits: async () => units,
+            concurrency: 1,
+            maxPromptTokens: 5_000,
+        });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['body.'], calls);
+
+        const { sink, events } = collectSink();
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+
+        // More than one provider call → sub-chunked.
+        expect(calls.length).toBeGreaterThan(1);
+        // Every per-chunk user prompt should carry the chunk-marker text.
+        for (const c of calls) {
+            expect(c.userPrompt).toContain('sub-chunk of an oversized section');
+        }
+        // The merged section emits subheadings marking each chunk.
+        const chunkEvents = events.filter((e) => e.kind === 'chunk') as Extract<NarrationEvent, { kind: 'chunk' }>[];
+        const merged = chunkEvents.map((c) => c.text).join('');
+        expect(merged).toMatch(/### Lines \[L\d+-L\d+\]/);
+        expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
+    });
+
+    test('does NOT sub-chunk when the symbol body fits the budget', async () => {
+        const doc = mockDoc('short content\nstill short\n');
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'small', range: new vscode.Range(0, 0, 1, 11) },
+        ];
+        const { options } = makeOptions({
+            fetchUnits: async () => units,
+            concurrency: 1,
+            maxPromptTokens: 50_000,
+        });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['ok'], calls);
+
+        const { sink } = collectSink();
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+
+        // Exactly one call when the body fits.
+        expect(calls).toHaveLength(1);
+        expect(calls[0].userPrompt).not.toContain('sub-chunk');
+    });
+
     test('respects the concurrency cap when there are more units than workers', async () => {
         const units: NarrationUnit[] = Array.from({ length: 6 }, (_, i) => ({
             kind: 'symbol' as const,
