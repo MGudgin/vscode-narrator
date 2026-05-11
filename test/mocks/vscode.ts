@@ -29,20 +29,34 @@ export const SymbolKind = {
 };
 
 const configOverrides = new Map<string, unknown>();
+const configInspectOverrides = new Map<string, Record<string, unknown>>();
 
 export function __setConfig(key: string, value: unknown): void {
     configOverrides.set(key, value);
 }
 
+export function __setConfigInspect(key: string, value: Record<string, unknown>): void {
+    configInspectOverrides.set(key, value);
+}
+
 export function __resetConfig(): void {
     configOverrides.clear();
+    configInspectOverrides.clear();
 }
 
 export const workspace = {
-    getConfiguration(_section: string) {
+    getConfiguration(_section: string, _scope?: unknown) {
         return {
             get<T>(key: string, defaultValue: T): T {
                 return configOverrides.has(key) ? (configOverrides.get(key) as T) : defaultValue;
+            },
+            inspect<T>(key: string): { globalValue?: T; globalLanguageValue?: T } | undefined {
+                const explicit = configInspectOverrides.get(key);
+                if (explicit) return explicit as { globalValue?: T; globalLanguageValue?: T };
+                if (configOverrides.has(key)) {
+                    return { globalValue: configOverrides.get(key) as T };
+                }
+                return {};
             },
         };
     },

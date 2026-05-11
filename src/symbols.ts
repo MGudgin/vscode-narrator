@@ -14,6 +14,25 @@ export interface NarrationUnitOptions {
     recurse?: boolean;
 }
 
+const CONTAINER_HEAVY_LANGUAGES: ReadonlySet<string> = new Set([
+    'csharp', 'java', 'cpp', 'c', 'kotlin', 'swift', 'scala',
+    'fsharp', 'vb', 'objective-c', 'objective-cpp',
+]);
+
+export function resolveRecurseSymbols(doc: vscode.TextDocument): boolean {
+    const config = vscode.workspace.getConfiguration('codeNarration', doc.uri);
+    const inspected = config.inspect<boolean>('recurseSymbols');
+    const explicit =
+        inspected?.workspaceFolderLanguageValue
+        ?? inspected?.workspaceLanguageValue
+        ?? inspected?.globalLanguageValue
+        ?? inspected?.workspaceFolderValue
+        ?? inspected?.workspaceValue
+        ?? inspected?.globalValue;
+    if (typeof explicit === 'boolean') return explicit;
+    return CONTAINER_HEAVY_LANGUAGES.has(doc.languageId);
+}
+
 export async function getNarrationUnits(
     doc: vscode.TextDocument,
     options: NarrationUnitOptions = {},
@@ -22,8 +41,7 @@ export async function getNarrationUnits(
     const symbols = await fetcher(doc);
     if (symbols.length === 0) return [];
 
-    const recurse = options.recurse
-        ?? vscode.workspace.getConfiguration('codeNarration').get<boolean>('recurseSymbols', false);
+    const recurse = options.recurse ?? resolveRecurseSymbols(doc);
     const expanded = recurse ? flattenSymbols(symbols) : symbols;
     const sorted = [...expanded].sort((a, b) => a.range.start.line - b.range.start.line);
     const units: NarrationUnit[] = [];

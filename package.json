@@ -114,7 +114,8 @@
         "codeNarration.recurseSymbols": {
           "type": "boolean",
           "default": false,
-          "description": "When true, narrate each child symbol (e.g., methods inside a class) as its own section in addition to its parent. Off by default to keep narration focused on top-level structure."
+          "scope": "language-overridable",
+          "description": "When true, narrate each child symbol (e.g., methods inside a class) as its own section in addition to its parent. Defaults to true for container-heavy languages (C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++) and false elsewhere; set explicitly to override."
         }
       }
     }

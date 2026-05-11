@@ -47,7 +47,9 @@ You can also edit settings directly:
 | `codeNarration.diffBase` | `HEAD` | Git ref for diff mode |
 | `codeNarration.narrateOnSave` | `true` | Re-narrate after save |
 | `codeNarration.symbolConcurrency` | `4` | Max parallel LLM calls during symbol-aware fan-out (1–16) |
-| `codeNarration.recurseSymbols` | `false` | Narrate child symbols (e.g. methods inside a class) as their own sections |
+| `codeNarration.recurseSymbols` | `false` (`true` for container-heavy languages — see below) | Narrate child symbols (e.g. methods inside a class) as their own sections |
+
+For languages whose top level is mostly namespaces and classes — C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++ — `recurseSymbols` defaults to `true` so methods, properties, and events each get their own section. Other languages keep the top-level-only default. Set `codeNarration.recurseSymbols` globally or under a `[language]` scope to override.
 
 ## Commands
 
