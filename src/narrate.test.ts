@@ -8,7 +8,8 @@ import {
     NarrationOptions,
     NarrationSink,
 } from './narrate';
-import { NarrationCache, fileKey, diffKey, treeDiffKey } from './cache';
+import { NarrationCache, fileKey, sectionKey, diffKey, treeDiffKey } from './cache';
+import { DEFAULT_MAX_PROMPT_TOKENS } from './chunking';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit } from './symbols';
 import { DiffResult, TreeDiffResult } from './diff';
@@ -34,7 +35,12 @@ function mockDoc(text: string): vscode.TextDocument {
         uri: vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri,
         languageId: 'typescript',
         lineCount: lines.length,
-        getText: () => text,
+        getText: (range?: vscode.Range) => {
+            if (!range) return text;
+            const startLine = range.start.line;
+            const endLine = range.end.line;
+            return lines.slice(startLine, endLine + 1).join('\n');
+        },
         lineAt: (line: number) => ({
             text: lines[line] ?? '',
             range: new vscode.Range(line, 0, line, (lines[line] ?? '').length),
@@ -285,8 +291,80 @@ describe('narrateDocument', () => {
         const { sink } = collectSink();
         await narrateDocument(doc, provider, liveToken(), sink, options);
 
-        const stored = await cache.get(fileKey(doc.uri, doc.getText(), providerInfo));
-        expect(stored).toBeUndefined();
+        // Per-section caching: the successful section's key must remain unwritten
+        // when any sibling section fails — preserves the existing all-or-nothing
+        // guarantee on a per-narration basis.
+        const fooKey = sectionKey(
+            doc.uri,
+            'foo',
+            doc.getText(new vscode.Range(0, 0, 1, 0)),
+            DEFAULT_MAX_PROMPT_TOKENS,
+            providerInfo,
+        );
+        expect(await cache.get(fooKey)).toBeUndefined();
+    });
+
+    test('per-section cache: editing one section re-narrates only that section', async () => {
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'foo', range: new vscode.Range(0, 0, 0, 8) },
+            { kind: 'symbol', name: 'bar', range: new vscode.Range(1, 0, 1, 8) },
+            { kind: 'symbol', name: 'baz', range: new vscode.Range(2, 0, 2, 8) },
+        ];
+        const { options } = makeOptions({ fetchUnits: async () => units, concurrency: 4 });
+
+        // First narration: cold cache, expect one provider call per unit.
+        const doc1 = mockDoc('foo body\nbar body\nbaz body\n');
+        const calls1: ProviderCall[] = [];
+        const provider1 = chunkProvider(['narration.'], calls1);
+        const { sink: sink1 } = collectSink();
+        await narrateDocument(doc1, provider1, liveToken(), sink1, options);
+        expect(calls1).toHaveLength(3);
+
+        // Second narration with the same provider+options but only "bar"'s
+        // line changed. Per-section cache should hit foo and baz, miss bar.
+        const doc2 = mockDoc('foo body\nBAR EDITED\nbaz body\n');
+        const calls2: ProviderCall[] = [];
+        const provider2 = chunkProvider(['fresh.'], calls2);
+        const { sink: sink2, events: events2 } = collectSink();
+        await narrateDocument(doc2, provider2, liveToken(), sink2, options);
+
+        // Acceptance criterion: exactly one LLM call on a single-section edit.
+        expect(calls2).toHaveLength(1);
+        expect(calls2[0].userPrompt).toContain('Section: bar');
+
+        // Cache hits surface as pre-populated bodyMarkdown in the init payload;
+        // the missed section has no body yet (it streams in via chunks).
+        const init = events2.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const foo = init.sections.find((s) => s.id === 's0');
+        const bar = init.sections.find((s) => s.id === 's1');
+        const baz = init.sections.find((s) => s.id === 's2');
+        expect(foo?.bodyMarkdown).toBe('narration.');
+        expect(baz?.bodyMarkdown).toBe('narration.');
+        expect(bar?.bodyMarkdown).toBeUndefined();
+        // Mixed cache state — banner should NOT claim a full cache hit.
+        expect(init.fromCache).toBeFalsy();
+    });
+
+    test('per-section cache: all hits sets fromCache and skips the provider entirely', async () => {
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'foo', range: new vscode.Range(0, 0, 0, 8) },
+            { kind: 'symbol', name: 'bar', range: new vscode.Range(1, 0, 1, 8) },
+        ];
+        const { options } = makeOptions({ fetchUnits: async () => units });
+        const doc = mockDoc('foo body\nbar body\n');
+
+        const calls1: ProviderCall[] = [];
+        await narrateDocument(doc, chunkProvider(['hi.'], calls1), liveToken(), collectSink().sink, options);
+        expect(calls1).toHaveLength(2);
+
+        const calls2: ProviderCall[] = [];
+        const { sink, events } = collectSink();
+        await narrateDocument(doc, chunkProvider(['SHOULD-NOT-APPEAR'], calls2), liveToken(), sink, options);
+
+        expect(calls2).toHaveLength(0);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.fromCache).toBe(true);
+        expect(init.sections.every((s) => s.id === 's0' || s.id === 's1' ? !!s.bodyMarkdown : true)).toBe(true);
     });
 });
 

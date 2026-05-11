@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit, getNarrationUnits } from './symbols';
 import { DiffResult, TreeChange, TreeDiffResult, getDiff, getTreeDiff } from './diff';
-import { NarrationCache, fileKey, diffKey, treeDiffKey } from './cache';
+import { NarrationCache, fileKey, sectionKey, diffKey, treeDiffKey } from './cache';
 import {
     SYSTEM_PROMPT,
     SYMBOL_SYSTEM_PROMPT,
@@ -328,25 +328,26 @@ async function narrateFileBody(
     options: NarrationOptions,
     prefixSections: SectionInit[],
 ): Promise<void> {
-    const key = fileKey(doc.uri, doc.getText(), options.providerInfo);
-    if (!options.skipCache) {
-        const cached = await options.cache.get(key);
-        if (cached) {
-            sink({
-                kind: 'init',
-                sections: [...prefixSections, { id: 'cached', bodyMarkdown: cached }],
-                fromCache: true,
-            });
-            sink({ kind: 'done' });
-            return;
-        }
-    }
-
     const fetchUnits = options.fetchUnits ?? getNarrationUnits;
     const units = await fetchUnits(doc);
     if (token.isCancellationRequested) return;
 
     if (units.length === 0) {
+        // No symbol provider results — fall back to whole-file caching, keyed
+        // on the entire document text. Per-section caching does not apply here.
+        const key = fileKey(doc.uri, doc.getText(), options.providerInfo);
+        if (!options.skipCache) {
+            const cached = await options.cache.get(key);
+            if (cached) {
+                sink({
+                    kind: 'init',
+                    sections: [...prefixSections, { id: 'cached', bodyMarkdown: cached }],
+                    fromCache: true,
+                });
+                sink({ kind: 'done' });
+                return;
+            }
+        }
         sink({ kind: 'init', sections: [...prefixSections, { id: 'main' }] });
         let acc = '';
         await withTransientRetry(
@@ -370,12 +371,28 @@ async function narrateFileBody(
         return;
     }
 
-    const sections = units.map((unit, i) => ({
+    const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
+    const sections: Section[] = units.map((unit, i) => ({
         id: `s${i}`,
         unit,
         headingMarkdown: buildHeading(doc.uri, unit, unit.name),
         accumulated: '',
+        cacheKey: sectionKey(
+            doc.uri,
+            unit.name,
+            doc.getText(unit.range),
+            maxPromptTokens,
+            options.providerInfo,
+        ),
+        cachedBody: undefined,
     }));
+
+    if (!options.skipCache) {
+        await Promise.all(sections.map(async (s) => {
+            s.cachedBody = await options.cache.get(s.cacheKey);
+        }));
+    }
+    const allCached = sections.length > 0 && sections.every((s) => s.cachedBody !== undefined);
 
     sink({
         kind: 'init',
@@ -385,15 +402,17 @@ async function narrateFileBody(
                 id: s.id,
                 headingMarkdown: s.headingMarkdown,
                 range: s.unit.range,
+                bodyMarkdown: s.cachedBody,
             })),
         ],
+        fromCache: allCached || undefined,
     });
 
     const concurrency = options.concurrency ?? readSymbolConcurrency();
-    const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
     let anyFailure = false;
     await mapWithConcurrency(sections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;
+        if (sec.cachedBody !== undefined) return;
         try {
             await narrateSection(sec, doc, provider, token, sink, maxPromptTokens);
         } catch (err) {
@@ -411,14 +430,14 @@ async function narrateFileBody(
     if (token.isCancellationRequested) return;
 
     if (!anyFailure) {
-        const finalMd = sections
-            .map((s) => {
-                const body = fixupLinks(s.accumulated, doc.uri).trim()
-                    || '_(no narration produced for this section.)_';
-                return `${s.headingMarkdown}\n\n${body}`;
-            })
-            .join('\n\n');
-        await options.cache.set(key, finalMd);
+        const writes: { key: string; markdown: string }[] = [];
+        for (const s of sections) {
+            if (s.cachedBody !== undefined) continue;
+            const body = fixupLinks(s.accumulated, doc.uri);
+            if (body.trim().length === 0) continue;
+            writes.push({ key: s.cacheKey, markdown: body });
+        }
+        if (writes.length > 0) await options.cache.setMany(writes);
     }
     sink({ kind: 'done' });
 }
@@ -428,6 +447,8 @@ interface Section {
     unit: NarrationUnit;
     headingMarkdown: string;
     accumulated: string;
+    cacheKey: string;
+    cachedBody: string | undefined;
 }
 
 /**
