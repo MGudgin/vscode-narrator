@@ -141,34 +141,56 @@ describe('getNarrationUnits', () => {
 describe('resolveRecurseSymbols', () => {
     afterEach(() => __resetConfig());
 
-    test('defaults to true for container-heavy languages (csharp)', () => {
+    test('auto: recurses for container-heavy languages (csharp)', () => {
         expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
     });
 
-    test('defaults to true for cpp', () => {
+    test('auto: recurses for cpp', () => {
         expect(resolveRecurseSymbols(mockDoc([''], 'cpp'))).toBe(true);
     });
 
-    test('defaults to false for typescript', () => {
+    test('auto: top-level only for typescript', () => {
         expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(false);
     });
 
-    test('defaults to false for python', () => {
+    test('auto: top-level only for python', () => {
         expect(resolveRecurseSymbols(mockDoc([''], 'python'))).toBe(false);
     });
 
-    test('user globalValue=false wins over csharp default', () => {
-        __setConfigInspect('recurseSymbols', { globalValue: false });
+    test('"never" overrides csharp auto', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'never' });
         expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(false);
     });
 
-    test('user globalValue=true wins over typescript default', () => {
+    test('"always" overrides typescript auto', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'always' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(true);
+    });
+
+    test('explicit "auto" falls back to the language default', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'auto' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(false);
+    });
+
+    test('language-scoped value overrides global value', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'never', globalLanguageValue: 'always' });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+    });
+
+    test('legacy boolean true is honored as "always"', () => {
         __setConfigInspect('recurseSymbols', { globalValue: true });
         expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(true);
     });
 
-    test('globalLanguageValue overrides globalValue', () => {
-        __setConfigInspect('recurseSymbols', { globalValue: false, globalLanguageValue: true });
+    test('legacy boolean false is honored as "never"', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: false });
+        expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(false);
+    });
+
+    test('unknown string falls back to language default', () => {
+        __setConfigInspect('recurseSymbols', { globalValue: 'garbage' });
         expect(resolveRecurseSymbols(mockDoc([''], 'csharp'))).toBe(true);
+        expect(resolveRecurseSymbols(mockDoc([''], 'typescript'))).toBe(false);
     });
 });

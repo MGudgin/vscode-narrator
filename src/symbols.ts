@@ -19,17 +19,28 @@ const CONTAINER_HEAVY_LANGUAGES: ReadonlySet<string> = new Set([
     'fsharp', 'vb', 'objective-c', 'objective-cpp',
 ]);
 
+export type RecurseSetting = 'auto' | 'always' | 'never';
+
+export function normalizeRecurseSetting(value: unknown): RecurseSetting | undefined {
+    if (value === 'always' || value === true) return 'always';
+    if (value === 'never' || value === false) return 'never';
+    if (value === 'auto') return 'auto';
+    return undefined;
+}
+
 export function resolveRecurseSymbols(doc: vscode.TextDocument): boolean {
     const config = vscode.workspace.getConfiguration('codeNarration', doc.uri);
-    const inspected = config.inspect<boolean>('recurseSymbols');
-    const explicit =
+    const inspected = config.inspect<unknown>('recurseSymbols');
+    const raw =
         inspected?.workspaceFolderLanguageValue
         ?? inspected?.workspaceLanguageValue
         ?? inspected?.globalLanguageValue
         ?? inspected?.workspaceFolderValue
         ?? inspected?.workspaceValue
         ?? inspected?.globalValue;
-    if (typeof explicit === 'boolean') return explicit;
+    const setting = normalizeRecurseSetting(raw) ?? 'auto';
+    if (setting === 'always') return true;
+    if (setting === 'never') return false;
     return CONTAINER_HEAVY_LANGUAGES.has(doc.languageId);
 }
 
