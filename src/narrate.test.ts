@@ -3,14 +3,15 @@ import * as vscode from 'vscode';
 import {
     narrateDocument,
     narrateDiff,
+    narrateTreeDiff,
     NarrationEvent,
     NarrationOptions,
     NarrationSink,
 } from './narrate';
-import { NarrationCache, fileKey, diffKey } from './cache';
+import { NarrationCache, fileKey, diffKey, treeDiffKey } from './cache';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit } from './symbols';
-import { DiffResult } from './diff';
+import { DiffResult, TreeDiffResult } from './diff';
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -206,6 +207,32 @@ describe('narrateDocument', () => {
         expect(peak).toBeLessThanOrEqual(2);
         expect(peak).toBe(2);
     });
+
+    test('does not write the cache when any symbol section fails', async () => {
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'foo', range: new vscode.Range(0, 0, 1, 0) },
+            { kind: 'symbol', name: 'bar', range: new vscode.Range(2, 0, 3, 0) },
+        ];
+        const { options, cache } = makeOptions({ fetchUnits: async () => units, concurrency: 2 });
+        const doc = mockDoc('line0\nline1\nline2\nline3\n');
+
+        // First unit streams cleanly; second throws non-transient so withTransientRetry
+        // rethrows on first attempt and the section catch sets anyFailure.
+        let n = 0;
+        const provider: NarrationProvider = {
+            async *stream() {
+                const i = n++;
+                if (i === 1) throw new Error('boom');
+                yield 'ok.';
+            },
+        };
+
+        const { sink } = collectSink();
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+
+        const stored = await cache.get(fileKey(doc.uri, doc.getText(), providerInfo));
+        expect(stored).toBeUndefined();
+    });
 });
 
 describe('narrateDiff', () => {
@@ -314,5 +341,175 @@ describe('narrateDiff', () => {
 
         // Pre-cancelled token should short-circuit before emitting any events.
         expect(events).toHaveLength(0);
+    });
+});
+
+describe('narrateTreeDiff', () => {
+    const repoRoot = vscode.Uri.parse('file:///foo/repo') as unknown as vscode.Uri;
+
+    test('emits a "No changes" section when the tree is clean', async () => {
+        const { options } = makeOptions({ fetchTreeDiff: async () => ({ kind: 'noChanges' } as TreeDiffResult) });
+        const calls: ProviderCall[] = [];
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', chunkProvider([], calls), liveToken(), sink, options);
+
+        expect(calls).toHaveLength(0);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.sections[0].bodyMarkdown).toContain('No changes');
+        expect(init.sections[0].bodyMarkdown).toContain('origin/main');
+        expect(events[events.length - 1]).toEqual({ kind: 'done' });
+    });
+
+    test('throws when no repo is found', async () => {
+        const { options } = makeOptions({ fetchTreeDiff: async () => ({ kind: 'noRepo' } as TreeDiffResult) });
+        const { sink } = collectSink();
+        await expect(
+            narrateTreeDiff(repoRoot, 'origin/main', chunkProvider([]), liveToken(), sink, options),
+        ).rejects.toThrow(/git repository/);
+    });
+
+    test('emits summary plus one section per changed file and caches the result', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ a\n@@ b',
+            changes: [
+                {
+                    uri: vscode.Uri.parse('file:///foo/repo/src/a.ts') as unknown as vscode.Uri,
+                    status: 'modified',
+                    unifiedDiff: '@@ a',
+                },
+                {
+                    uri: vscode.Uri.parse('file:///foo/repo/src/b.ts') as unknown as vscode.Uri,
+                    status: 'added',
+                    unifiedDiff: '@@ b',
+                },
+            ],
+        };
+        const { options, cache } = makeOptions({ fetchTreeDiff: async () => tree });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['body.'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        // One LLM call for the summary plus one per file.
+        expect(calls).toHaveLength(3);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.sections.map((s) => s.id)).toEqual(['summary', 'f0', 'f1']);
+        // Per-file sections carry their own linkUri so navigation lands in the right file.
+        expect(init.sections[1].linkUri?.toString()).toBe('file:///foo/repo/src/a.ts');
+        expect(init.sections[2].linkUri?.toString()).toBe('file:///foo/repo/src/b.ts');
+        const sectionDones = events.filter((e) => e.kind === 'sectionDone');
+        expect(sectionDones).toHaveLength(3);
+
+        const stored = await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo));
+        expect(stored).toContain('## Overview');
+        expect(stored).toContain('a.ts');
+        expect(stored).toContain('b.ts');
+    });
+
+    test('returns a cache hit without calling the provider', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ x',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/x.ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ x',
+            }],
+        };
+        const { options, cache } = makeOptions({ fetchTreeDiff: async () => tree });
+        await cache.set(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo), 'cached tree');
+
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['SHOULD-NOT-APPEAR'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        expect(calls).toHaveLength(0);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.fromCache).toBe(true);
+        expect(init.sections.some((s) => s.bodyMarkdown === 'cached tree')).toBe(true);
+    });
+
+    test('skipCache=true bypasses the cached value and re-streams', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ y',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/y.ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ y',
+            }],
+        };
+        const { options, cache } = makeOptions({ fetchTreeDiff: async () => tree, skipCache: true });
+        await cache.set(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo), 'stale');
+
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['fresh'], calls);
+        const { sink } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        // One summary call + one per-file call.
+        expect(calls).toHaveLength(2);
+        const stored = await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo));
+        expect(stored).not.toBe('stale');
+        expect(stored).toContain('fresh');
+    });
+
+    test('renamed files surface "old → new" in the heading and the per-file prompt', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ r',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/src/new.ts') as unknown as vscode.Uri,
+                originalUri: vscode.Uri.parse('file:///foo/repo/src/old.ts') as unknown as vscode.Uri,
+                status: 'renamed',
+                unifiedDiff: '@@ r',
+            }],
+        };
+        const { options } = makeOptions({ fetchTreeDiff: async () => tree });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['body.'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const fileSection = init.sections.find((s) => s.id === 'f0');
+        expect(fileSection?.headingMarkdown).toContain('`src/old.ts` → `src/new.ts`');
+
+        const filePromptCall = calls.find((c) => c.userPrompt.includes('File: src/new.ts'));
+        expect(filePromptCall?.userPrompt).toContain('Renamed from: src/old.ts');
+
+        const summaryPromptCall = calls.find((c) => c.userPrompt.includes('Changed files:'));
+        expect(summaryPromptCall?.userPrompt).toContain('[renamed] src/old.ts → src/new.ts');
+    });
+
+    test('does not write the cache when any per-file section fails', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ z',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/z.ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ z',
+            }],
+        };
+        const { options, cache } = makeOptions({ fetchTreeDiff: async () => tree });
+
+        // Provider fails after streaming nothing — withTransientRetry exhausts retries and rethrows.
+        const provider: NarrationProvider = {
+            async *stream() { throw new Error('boom'); },
+        };
+        const { sink } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const stored = await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo));
+        expect(stored).toBeUndefined();
     });
 });

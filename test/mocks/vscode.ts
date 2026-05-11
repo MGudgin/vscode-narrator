@@ -67,6 +67,28 @@ export const workspace = {
     },
 };
 
+interface FakeExtension<T> {
+    isActive: boolean;
+    exports: T;
+    activate(): Promise<T>;
+}
+
+const extensionRegistry = new Map<string, FakeExtension<unknown>>();
+
+export function __setExtension<T>(id: string, ext: FakeExtension<T>): void {
+    extensionRegistry.set(id, ext as FakeExtension<unknown>);
+}
+
+export function __resetExtensions(): void {
+    extensionRegistry.clear();
+}
+
+export const extensions = {
+    getExtension<T>(id: string): FakeExtension<T> | undefined {
+        return extensionRegistry.get(id) as FakeExtension<T> | undefined;
+    },
+};
+
 export class CancellationTokenSource {
     private cancelled = false;
     token: { isCancellationRequested: boolean; onCancellationRequested: (cb: () => void) => { dispose: () => void } } = {

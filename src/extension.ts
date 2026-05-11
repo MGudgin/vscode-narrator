@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import {
     readProviderConfig,
@@ -7,23 +8,29 @@ import {
     clearAnthropicKey,
     MissingApiKeyError,
 } from './llm/index';
-import { narrateDocument, narrateDiff, NarrationSink } from './narrate';
+import { narrateDocument, narrateDiff, narrateTreeDiff, NarrationSink } from './narrate';
 import { renderShell, renderError, renderMarkdownToHtml, aggregateBannerStatus } from './webview';
-import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel } from './target';
+import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName } from './target';
 import { NarrationCache } from './cache';
 import { fixupLinks } from './prompt';
+import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
 
 let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
 let inFlight: vscode.CancellationTokenSource | undefined;
 let saveDebounce: NodeJS.Timeout | undefined;
 let selectionDebounce: NodeJS.Timeout | undefined;
+let repoStateDebounce: NodeJS.Timeout | undefined;
+let repoWatcher: vscode.Disposable | undefined;
+let watchedRepoRoot: string | undefined;
+let repoWatcherPrimed = false;
 let cache: NarrationCache | undefined;
 const sectionRanges: { id: string; range: vscode.Range }[] = [];
 
 const SAVE_DEBOUNCE_MS = 500;
 const RENDER_THROTTLE_MS = 100;
 const SELECTION_DEBOUNCE_MS = 200;
+const REPO_STATE_DEBOUNCE_MS = 750;
 
 interface RunOptions {
     skipCache?: boolean;
@@ -34,6 +41,10 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('codeNarration.open', () => openFileNarration(context)),
         vscode.commands.registerCommand('codeNarration.openDiff', () => openDiffNarration(context)),
+        vscode.commands.registerCommand(
+            'codeNarration.openTreeDiff',
+            (source?: vscode.SourceControl) => openTreeDiffNarration(context, source),
+        ),
         vscode.commands.registerCommand('codeNarration.refresh', () => refreshNarration(context)),
         vscode.commands.registerCommand('codeNarration.reveal', revealLocation),
         vscode.commands.registerCommand('codeNarration.setApiKey', () => setApiKey(context)),
@@ -50,6 +61,11 @@ export function deactivate(): void {
     panel?.dispose();
     if (saveDebounce) clearTimeout(saveDebounce);
     if (selectionDebounce) clearTimeout(selectionDebounce);
+    if (repoStateDebounce) clearTimeout(repoStateDebounce);
+    repoWatcher?.dispose();
+    repoWatcher = undefined;
+    watchedRepoRoot = undefined;
+    repoWatcherPrimed = false;
 }
 
 async function openFileNarration(context: vscode.ExtensionContext): Promise<void> {
@@ -73,6 +89,48 @@ async function openDiffNarration(context: vscode.ExtensionContext): Promise<void
     await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef });
 }
 
+async function openTreeDiffNarration(
+    context: vscode.ExtensionContext,
+    source?: vscode.SourceControl,
+): Promise<void> {
+    let repoRoot: vscode.Uri | undefined = source?.rootUri;
+    if (!repoRoot) {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            repoRoot = await findRepoRootForUri(editor.document.uri);
+        }
+    }
+    if (!repoRoot) {
+        const roots = await listRepoRoots();
+        if (roots.length === 0) {
+            vscode.window.showInformationMessage('No git repository found.');
+            return;
+        }
+        if (roots.length === 1) {
+            repoRoot = roots[0];
+        } else {
+            repoRoot = await pickRepoRoot(roots);
+            if (!repoRoot) return;
+        }
+    }
+    const baseRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
+    ensurePanel(context);
+    await runNarration(context, { kind: 'tree', repoRoot, baseRef });
+}
+
+async function pickRepoRoot(roots: vscode.Uri[]): Promise<vscode.Uri | undefined> {
+    const items = roots.map((uri) => ({
+        label: path.basename(uri.fsPath) || uri.fsPath,
+        description: uri.fsPath,
+        uri,
+    }));
+    const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Select a git repository to narrate',
+        matchOnDescription: true,
+    });
+    return picked?.uri;
+}
+
 async function refreshNarration(context: vscode.ExtensionContext): Promise<void> {
     if (!currentTarget) {
         vscode.window.showInformationMessage('No narration to refresh. Open one first.');
@@ -84,10 +142,16 @@ async function refreshNarration(context: vscode.ExtensionContext): Promise<void>
 
 function ensurePanel(context: vscode.ExtensionContext): void {
     if (panel) return;
+    // ViewColumn.Beside falls back to column 1 when no editor is active, which means
+    // a later Explorer click opens the file on top of the webview. Pin to column 2 in
+    // that case so files always land in column 1.
+    const initialColumn = vscode.window.activeTextEditor
+        ? vscode.ViewColumn.Beside
+        : vscode.ViewColumn.Two;
     panel = vscode.window.createWebviewPanel(
         'codeNarration',
         'Narration',
-        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+        { viewColumn: initialColumn, preserveFocus: true },
         {
             enableCommandUris: true,
             enableScripts: true,
@@ -99,10 +163,41 @@ function ensurePanel(context: vscode.ExtensionContext): void {
             panel = undefined;
             currentTarget = undefined;
             inFlight?.cancel();
+            repoWatcher?.dispose();
+            repoWatcher = undefined;
+            watchedRepoRoot = undefined;
+            repoWatcherPrimed = false;
         },
         null,
         context.subscriptions,
     );
+}
+
+async function updateRepoWatcher(context: vscode.ExtensionContext, target: NarrationTarget): Promise<void> {
+    const desiredRoot = target.kind === 'tree' ? target.repoRoot.toString() : undefined;
+    if (desiredRoot === watchedRepoRoot) return;
+
+    repoWatcher?.dispose();
+    repoWatcher = undefined;
+    watchedRepoRoot = undefined;
+    repoWatcherPrimed = false;
+
+    if (target.kind !== 'tree') return;
+
+    const watcher = await watchRepoState(target.repoRoot, (repoRoot) => {
+        if (!repoWatcherPrimed) {
+            repoWatcherPrimed = true;
+            return;
+        }
+        if (!currentTarget || currentTarget.kind !== 'tree') return;
+        if (currentTarget.repoRoot.toString() !== repoRoot.toString()) return;
+        if (repoStateDebounce) clearTimeout(repoStateDebounce);
+        const t = currentTarget;
+        repoStateDebounce = setTimeout(() => void runNarration(context, t), REPO_STATE_DEBOUNCE_MS);
+    });
+    if (!watcher) return;
+    repoWatcher = watcher;
+    watchedRepoRoot = desiredRoot;
 }
 
 async function runNarration(
@@ -121,11 +216,13 @@ async function runNarration(
     sectionRanges.length = 0;
     const bannerLabel = targetBannerLabel(target);
     panel.title = targetTitle(target);
-    panel.webview.html = renderShell(panel.webview, shortName(target.uri), bannerLabel);
-    panel.reveal(vscode.ViewColumn.Beside, true);
+    panel.webview.html = renderShell(panel.webview, targetShortName(target), bannerLabel);
+    panel.reveal(panel.viewColumn, true);
+
+    void updateRepoWatcher(context, target);
 
     type Status = 'queued' | 'streaming' | 'complete';
-    const sectionState = new Map<string, { accumulated: string; lastRender: number; static: boolean; status: Status }>();
+    const sectionState = new Map<string, { accumulated: string; lastRender: number; static: boolean; status: Status; linkUri: vscode.Uri }>();
     const activePanel = panel;
     let lastBannerStatus: 'hidden' | 'streaming' | 'complete' = 'hidden';
     const syncBannerStatus = (): void => {
@@ -136,6 +233,7 @@ async function runNarration(
         lastBannerStatus = next;
         void activePanel.webview.postMessage({ kind: 'bannerStatus', status: next });
     };
+    const fallbackLinkUri = target.kind === 'tree' ? target.repoRoot : target.uri;
 
     const sink: NarrationSink = (event) => {
         if (token.isCancellationRequested) return;
@@ -147,11 +245,12 @@ async function runNarration(
                     if (s.range) {
                         sectionRanges.push({ id: s.id, range: s.range });
                     }
+                    const linkUri = s.linkUri ?? fallbackLinkUri;
                     const headingHtml = s.headingMarkdown
-                        ? renderMarkdownToHtml(fixupLinks(s.headingMarkdown, target.uri))
+                        ? renderMarkdownToHtml(fixupLinks(s.headingMarkdown, linkUri))
                         : '';
                     const bodyHtml = s.bodyMarkdown
-                        ? renderMarkdownToHtml(fixupLinks(s.bodyMarkdown, target.uri))
+                        ? renderMarkdownToHtml(fixupLinks(s.bodyMarkdown, linkUri))
                         : '';
                     const isStatic = !!s.bodyMarkdown;
                     const initialStatus: Status = isStatic ? 'complete' : 'queued';
@@ -160,6 +259,7 @@ async function runNarration(
                         lastRender: 0,
                         static: isStatic,
                         status: initialStatus,
+                        linkUri,
                     });
                     return { id: s.id, headingHtml, bodyHtml, status: initialStatus };
                 });
@@ -189,7 +289,7 @@ async function runNarration(
                 const now = Date.now();
                 if (now - state.lastRender < RENDER_THROTTLE_MS) return;
                 state.lastRender = now;
-                const html = renderMarkdownToHtml(fixupLinks(state.accumulated, target.uri));
+                const html = renderMarkdownToHtml(fixupLinks(state.accumulated, state.linkUri));
                 void activePanel.webview.postMessage({ kind: 'replace', sectionId: event.sectionId, bodyHtml: html });
                 break;
             }
@@ -220,7 +320,7 @@ async function runNarration(
                     const md = state.accumulated.trim().length > 0
                         ? state.accumulated
                         : '_(no narration produced for this section.)_';
-                    const html = renderMarkdownToHtml(fixupLinks(md, target.uri));
+                    const html = renderMarkdownToHtml(fixupLinks(md, state.linkUri));
                     void activePanel.webview.postMessage({
                         kind: 'replace',
                         sectionId: event.sectionId,
@@ -242,7 +342,7 @@ async function runNarration(
                         const md = state.accumulated.trim().length > 0
                             ? state.accumulated
                             : '_(no narration produced for this section.)_';
-                        const html = renderMarkdownToHtml(fixupLinks(md, target.uri));
+                        const html = renderMarkdownToHtml(fixupLinks(md, state.linkUri));
                         void activePanel.webview.postMessage({ kind: 'replace', sectionId: id, bodyHtml: html });
                     }
                     state.status = 'complete';
@@ -259,7 +359,6 @@ async function runNarration(
     };
 
     try {
-        const doc = await vscode.workspace.openTextDocument(target.uri);
         const providerConfig = await readProviderConfig(context);
         const provider = makeProvider(providerConfig);
         const providerInfo = describeProvider(providerConfig);
@@ -269,9 +368,13 @@ async function runNarration(
             providerInfo,
         };
 
-        if (target.kind === 'file') {
+        if (target.kind === 'tree') {
+            await narrateTreeDiff(target.repoRoot, target.baseRef, provider, token, sink, narrateOptions);
+        } else if (target.kind === 'file') {
+            const doc = await vscode.workspace.openTextDocument(target.uri);
             await narrateDocument(doc, provider, token, sink, narrateOptions);
         } else {
+            const doc = await vscode.workspace.openTextDocument(target.uri);
             await narrateDiff(doc, target.baseRef, provider, token, sink, narrateOptions);
         }
     } catch (err) {
@@ -297,6 +400,7 @@ async function runNarration(
 
 function onSelectionChange(e: vscode.TextEditorSelectionChangeEvent): void {
     if (!panel || !currentTarget) return;
+    if (currentTarget.kind === 'tree') return;
     if (e.textEditor.document.uri.toString() !== currentTarget.uri.toString()) return;
     if (sectionRanges.length === 0) return;
     const cursorLine = e.selections[0]?.active.line;
@@ -442,7 +546,3 @@ async function revealLocation(
     });
 }
 
-function shortName(uri: vscode.Uri): string {
-    const p = uri.fsPath || uri.path;
-    return p.split(/[\\/]/).pop() ?? uri.toString();
-}

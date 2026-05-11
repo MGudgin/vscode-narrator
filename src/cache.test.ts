@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { NarrationCache, fileKey, diffKey } from './cache';
+import { NarrationCache, fileKey, diffKey, treeDiffKey } from './cache';
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -129,5 +129,24 @@ describe('cache key builders', () => {
     test('diffKey changes when base ref changes', () => {
         expect(diffKey(uri, 'd', 'HEAD', provider))
             .not.toBe(diffKey(uri, 'd', 'origin/main', provider));
+    });
+
+    test('treeDiffKey is distinct from fileKey and diffKey for the same uri/content', () => {
+        // Same uri on every call so the discriminator field is the only thing that can disambiguate.
+        const tree = treeDiffKey(uri, 'combined', 'HEAD', provider);
+        expect(tree).not.toBe(fileKey(uri, 'combined', provider));
+        expect(tree).not.toBe(diffKey(uri, 'combined', 'HEAD', provider));
+    });
+
+    test('treeDiffKey changes when combined diff changes', () => {
+        const repoRoot = vscode.Uri.parse('file:///foo/repo') as unknown as vscode.Uri;
+        expect(treeDiffKey(repoRoot, 'a', 'HEAD', provider))
+            .not.toBe(treeDiffKey(repoRoot, 'b', 'HEAD', provider));
+    });
+
+    test('treeDiffKey changes when base ref changes', () => {
+        const repoRoot = vscode.Uri.parse('file:///foo/repo') as unknown as vscode.Uri;
+        expect(treeDiffKey(repoRoot, 'd', 'HEAD', provider))
+            .not.toBe(treeDiffKey(repoRoot, 'd', 'origin/main', provider));
     });
 });
