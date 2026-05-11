@@ -9,6 +9,7 @@ import {
     resetProviderFactory,
     waitFor,
     waitForSettled,
+    warmupSymbols,
 } from '../helpers';
 import type { ExtensionApi } from '../../../extension';
 
@@ -45,6 +46,7 @@ suite('onSave and per-section cache', () => {
         const file = makeTempFile(FIXTURE);
         const doc = await vscode.workspace.openTextDocument(file);
         const editor = await vscode.window.showTextDocument(doc);
+        await warmupSymbols(doc.uri);
 
         await vscode.commands.executeCommand('codeNarration.open');
 
@@ -87,6 +89,7 @@ suite('onSave and per-section cache', () => {
         const file = makeTempFile(PREAMBLE_FIXTURE);
         const doc = await vscode.workspace.openTextDocument(file);
         const editor = await vscode.window.showTextDocument(doc);
+        await warmupSymbols(doc.uri);
 
         await vscode.commands.executeCommand('codeNarration.open');
 

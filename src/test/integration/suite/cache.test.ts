@@ -7,6 +7,7 @@ import {
     installFakeProvider,
     makeTempFile,
     resetProviderFactory,
+    warmupSymbols,
 } from '../helpers';
 import type { ExtensionApi } from '../../../extension';
 
@@ -34,6 +35,7 @@ suite('Per-section cache, end-to-end', () => {
         const file = makeTempFile(TWO_SYMBOL_FIXTURE);
         const doc = await vscode.workspace.openTextDocument(file);
         await vscode.window.showTextDocument(doc);
+        await warmupSymbols(doc.uri);
 
         // First narration: cold. `executeCommand` awaits the full narration,
         // including the cache.setMany write, before resolving.
@@ -60,6 +62,7 @@ suite('Per-section cache, end-to-end', () => {
         const file = makeTempFile(TWO_SYMBOL_FIXTURE);
         const doc = await vscode.workspace.openTextDocument(file);
         await vscode.window.showTextDocument(doc);
+        await warmupSymbols(doc.uri);
 
         await vscode.commands.executeCommand('codeNarration.open');
         const initialCalls = fake.calls.length;

@@ -7,6 +7,7 @@ import {
     installFakeProvider,
     makeTempFile,
     resetProviderFactory,
+    warmupSymbols,
 } from '../helpers';
 import type { ExtensionApi } from '../../../extension';
 
@@ -35,6 +36,7 @@ suite('recurseSymbols setting', () => {
         const file = makeTempFile(CLASS_FIXTURE);
         const doc = await vscode.workspace.openTextDocument(file);
         await vscode.window.showTextDocument(doc);
+        await warmupSymbols(doc.uri);
 
         const config = vscode.workspace.getConfiguration('codeNarration');
         let topLevelCalls = 0;
