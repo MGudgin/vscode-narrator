@@ -14,8 +14,9 @@ import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
 import { renderShell, renderError } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName } from './target';
 import { NarrationCache } from './cache';
-import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
+import { findRepoRootForUri, listRepoRoots, watchRepoState, getRepositoryForUri, getRepositoryForRoot } from './diff';
 import { buildNarrationSink } from './sink';
+import { pickBaseRef } from './refPicker';
 
 export type ProviderFactory = (
     context: vscode.ExtensionContext,
@@ -62,10 +63,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     context.subscriptions.push(
         vscode.commands.registerCommand('codeNarration.open', () => openFileNarration(context)),
         vscode.commands.registerCommand('codeNarration.openDiff', () => openDiffNarration(context)),
+        vscode.commands.registerCommand('codeNarration.openDiffWithBase', () => openDiffWithBaseNarration(context)),
         vscode.commands.registerCommand(
             'codeNarration.openTreeDiff',
             (source?: vscode.SourceControl) => openTreeDiffNarration(context, source),
         ),
+        vscode.commands.registerCommand(
+            'codeNarration.openTreeDiffWithBase',
+            (source?: vscode.SourceControl) => openTreeDiffWithBaseNarration(context, source),
+        ),
+        vscode.commands.registerCommand('codeNarration.changeDiffBase', () => changeDiffBase(context)),
         vscode.commands.registerCommand('codeNarration.refresh', () => refreshNarration(context)),
         vscode.commands.registerCommand('codeNarration.reveal', revealLocation),
         vscode.commands.registerCommand('codeNarration.setApiKey', () => setApiKey(context)),
@@ -142,6 +149,85 @@ async function openTreeDiffNarration(
     const baseRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
     ensurePanel(context);
     await runNarration(context, { kind: 'tree', repoRoot, baseRef });
+}
+
+async function openDiffWithBaseNarration(context: vscode.ExtensionContext): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showInformationMessage('Open a file to narrate diffs for.');
+        return;
+    }
+    const repo = await getRepositoryForUri(editor.document.uri);
+    if (!repo) {
+        vscode.window.showInformationMessage('No git repository found for this file.');
+        return;
+    }
+    const defaultRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
+    const baseRef = await pickBaseRef(repo, defaultRef);
+    if (!baseRef) return;
+    ensurePanel(context);
+    await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef });
+}
+
+async function openTreeDiffWithBaseNarration(
+    context: vscode.ExtensionContext,
+    source?: vscode.SourceControl,
+): Promise<void> {
+    let repoRoot: vscode.Uri | undefined = source?.rootUri;
+    if (!repoRoot) {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            repoRoot = await findRepoRootForUri(editor.document.uri);
+        }
+    }
+    if (!repoRoot) {
+        const roots = await listRepoRoots();
+        if (roots.length === 0) {
+            vscode.window.showInformationMessage('No git repository found.');
+            return;
+        }
+        if (roots.length === 1) {
+            repoRoot = roots[0];
+        } else {
+            repoRoot = await pickRepoRoot(roots);
+            if (!repoRoot) return;
+        }
+    }
+    const repo = await getRepositoryForRoot(repoRoot);
+    if (!repo) {
+        vscode.window.showInformationMessage('No git repository found.');
+        return;
+    }
+    const defaultRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
+    const baseRef = await pickBaseRef(repo, defaultRef);
+    if (!baseRef) return;
+    ensurePanel(context);
+    await runNarration(context, { kind: 'tree', repoRoot, baseRef });
+}
+
+async function changeDiffBase(context: vscode.ExtensionContext): Promise<void> {
+    if (!currentTarget || (currentTarget.kind !== 'diff' && currentTarget.kind !== 'tree')) {
+        vscode.window.showInformationMessage('No diff narration is open.');
+        return;
+    }
+    const repoRoot = currentTarget.kind === 'diff'
+        ? await findRepoRootForUri(currentTarget.uri)
+        : currentTarget.repoRoot;
+    if (!repoRoot) {
+        vscode.window.showInformationMessage('No git repository found.');
+        return;
+    }
+    const repo = await getRepositoryForRoot(repoRoot);
+    if (!repo) {
+        vscode.window.showInformationMessage('No git repository found.');
+        return;
+    }
+    const newRef = await pickBaseRef(repo, currentTarget.baseRef);
+    if (!newRef || newRef === currentTarget.baseRef) return;
+    const updated: NarrationTarget = currentTarget.kind === 'diff'
+        ? { kind: 'diff', uri: currentTarget.uri, baseRef: newRef }
+        : { kind: 'tree', repoRoot: currentTarget.repoRoot, baseRef: newRef };
+    await runNarration(context, updated, { skipCache: true });
 }
 
 async function pickRepoRoot(roots: vscode.Uri[]): Promise<vscode.Uri | undefined> {
