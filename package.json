@@ -47,10 +47,25 @@
         "icon": "$(git-compare)"
       },
       {
+        "command": "codeNarration.openDiffWithBase",
+        "title": "Open Diff Narration (Pick Base Ref)…",
+        "category": "Code Narration"
+      },
+      {
         "command": "codeNarration.openTreeDiff",
         "title": "Open Tree Diff Narration",
         "category": "Code Narration",
         "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "codeNarration.openTreeDiffWithBase",
+        "title": "Open Tree Diff Narration (Pick Base Ref)…",
+        "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.changeDiffBase",
+        "title": "Change Diff Base…",
+        "category": "Code Narration"
       },
       {
         "command": "codeNarration.refresh",
@@ -179,7 +194,7 @@
         "codeNarration.diffBase": {
           "type": "string",
           "default": "HEAD",
-          "description": "Git ref to diff against in diff narration mode."
+          "description": "Git ref used by 'Open Diff Narration' (no prompt) and pre-selected in the 'Open Diff Narration (Pick Base Ref)…' picker."
         },
         "codeNarration.narrateOnSave": {
           "type": "boolean",
