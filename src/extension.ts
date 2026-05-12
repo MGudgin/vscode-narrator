@@ -16,11 +16,14 @@ import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel,
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState, getRepositoryForUri, getRepositoryForRoot } from './diff';
 import { buildNarrationSink } from './sink';
-import { pickBaseRef } from './refPicker';
+import { pickBaseRef as defaultPickBaseRef } from './refPicker';
+import type { PickerRepository } from './refPicker';
 
 export type ProviderFactory = (
     context: vscode.ExtensionContext,
 ) => Promise<{ provider: NarrationProvider; info: ProviderInfo }>;
+
+export type BaseRefPicker = (repo: PickerRepository, defaultRef: string) => Promise<string | undefined>;
 
 export interface ExtensionApi {
     /**
@@ -29,6 +32,13 @@ export interface ExtensionApi {
      * intended for integration tests that need to swap in a fake provider.
      */
     setProviderFactory(factory: ProviderFactory | undefined): void;
+    /**
+     * Override the base-ref picker used by openDiffWithBase / openTreeDiffWithBase /
+     * changeDiffBase. Pass `undefined` to restore the default quick-pick UI.
+     * Primarily intended for integration tests that need to drive the picker
+     * deterministically without the QuickPick UI.
+     */
+    setBaseRefPicker(picker: BaseRefPicker | undefined): void;
 }
 
 const defaultProviderFactory: ProviderFactory = async (context) => {
@@ -37,6 +47,7 @@ const defaultProviderFactory: ProviderFactory = async (context) => {
 };
 
 let providerFactory: ProviderFactory = defaultProviderFactory;
+let baseRefPicker: BaseRefPicker = defaultPickBaseRef;
 
 let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
@@ -84,6 +95,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     return {
         setProviderFactory(factory) {
             providerFactory = factory ?? defaultProviderFactory;
+        },
+        setBaseRefPicker(picker) {
+            baseRefPicker = picker ?? defaultPickBaseRef;
         },
     };
 }
@@ -163,7 +177,7 @@ async function openDiffWithBaseNarration(context: vscode.ExtensionContext): Prom
         return;
     }
     const defaultRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
-    const baseRef = await pickBaseRef(repo, defaultRef);
+    const baseRef = await baseRefPicker(repo, defaultRef);
     if (!baseRef) return;
     ensurePanel(context);
     await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef });
@@ -199,7 +213,7 @@ async function openTreeDiffWithBaseNarration(
         return;
     }
     const defaultRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
-    const baseRef = await pickBaseRef(repo, defaultRef);
+    const baseRef = await baseRefPicker(repo, defaultRef);
     if (!baseRef) return;
     ensurePanel(context);
     await runNarration(context, { kind: 'tree', repoRoot, baseRef });
@@ -222,7 +236,7 @@ async function changeDiffBase(context: vscode.ExtensionContext): Promise<void> {
         vscode.window.showInformationMessage('No git repository found.');
         return;
     }
-    const newRef = await pickBaseRef(repo, currentTarget.baseRef);
+    const newRef = await baseRefPicker(repo, currentTarget.baseRef);
     if (!newRef || newRef === currentTarget.baseRef) return;
     const updated: NarrationTarget = currentTarget.kind === 'diff'
         ? { kind: 'diff', uri: currentTarget.uri, baseRef: newRef }
