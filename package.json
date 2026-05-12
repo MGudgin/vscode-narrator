@@ -5,6 +5,10 @@
   "version": "0.2.0",
   "publisher": "gudge",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MGudgin/vscode-narrator.git"
+  },
   "icon": "icon.png",
   "engines": {
     "vscode": "^1.95.0"
