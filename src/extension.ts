@@ -23,6 +23,7 @@ import {
     listBuiltInPersonaIds,
     getBuiltInPersona,
 } from './personas';
+import { HeadTracker } from './headTracker';
 
 export type ProviderFactory = (
     context: vscode.ExtensionContext,
@@ -78,13 +79,16 @@ let activeEditorDebounce: NodeJS.Timeout | undefined;
 let repoWatcher: vscode.Disposable | undefined;
 let watchedRepoRoot: string | undefined;
 let repoWatcherPrimed = false;
+let headDebounce: NodeJS.Timeout | undefined;
 let cache: NarrationCache | undefined;
+let narrationInProgress = false;
 const sectionRanges: { id: string; range: vscode.Range }[] = [];
 
 const SAVE_DEBOUNCE_MS = 500;
 const SELECTION_DEBOUNCE_MS = 200;
 const REPO_STATE_DEBOUNCE_MS = 750;
 const ACTIVE_EDITOR_DEBOUNCE_MS = 250;
+const HEAD_DEBOUNCE_MS = 750;
 
 let cachedNarrateOnSave: boolean | undefined;
 
@@ -101,6 +105,23 @@ function refreshNarrateOnSaveCache(): void {
     cachedNarrateOnSave = vscode.workspace
         .getConfiguration('codeNarration')
         .get<boolean>('narrateOnSave', true);
+}
+
+// Minimal subset of the VS Code Git extension API surface we depend on.
+interface GitExtensionExports {
+    getAPI(version: 1): GitAPI;
+}
+interface GitAPI {
+    readonly repositories: GitRepository[];
+    onDidOpenRepository: vscode.Event<GitRepository>;
+    onDidCloseRepository: vscode.Event<GitRepository>;
+}
+interface GitRepository {
+    readonly rootUri: vscode.Uri;
+    readonly state: {
+        readonly HEAD: { readonly commit?: string } | undefined;
+        readonly onDidChange: vscode.Event<void>;
+    };
 }
 
 interface RunOptions {
@@ -180,6 +201,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
             if (e.affectsConfiguration('codeNarration.narrateOnSave')) refreshNarrateOnSaveCache();
         }),
     );
+    void subscribeToGitHeadMoves(context);
     return {
         setProviderFactory(factory) {
             providerFactory = factory ?? defaultProviderFactory;
@@ -271,6 +293,7 @@ export function deactivate(): void {
     watchedRepoRoot = undefined;
     repoWatcherPrimed = false;
     cachedNarrateOnSave = undefined;
+    if (headDebounce) clearTimeout(headDebounce);
 }
 
 async function openFileNarration(context: vscode.ExtensionContext): Promise<void> {
@@ -510,6 +533,7 @@ async function runNarration(
         sectionRanges,
     });
 
+    narrationInProgress = true;
     try {
         const { provider, info: providerInfo } = await providerFactory(context);
         const narrateOptions = {
@@ -548,6 +572,8 @@ async function runNarration(
         }
         const message = err instanceof Error ? err.message : String(err);
         panel.webview.html = renderError(panel.webview, message, undefined, bannerLabel, speechConfig);
+    } finally {
+        narrationInProgress = false;
     }
 }
 
@@ -638,6 +664,97 @@ function onActiveEditorChange(
     );
 }
 
+async function subscribeToGitHeadMoves(context: vscode.ExtensionContext): Promise<void> {
+    const ext = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
+    if (!ext) return;
+    let exports: GitExtensionExports;
+    try {
+        exports = ext.isActive ? ext.exports : await ext.activate();
+    } catch {
+        // Git extension failed to activate — nothing we can do; on-save still works.
+        return;
+    }
+    let api: GitAPI;
+    try {
+        api = exports.getAPI(1);
+    } catch {
+        return;
+    }
+
+    const tracker = new HeadTracker();
+    const repoDisposables = new Map<GitRepository, vscode.Disposable>();
+
+    const watchRepo = (repo: GitRepository): void => {
+        // Seed the baseline so the first onDidChange tick doesn't fire spuriously.
+        tracker.observe({ repoId: repo.rootUri.toString(), headCommit: repo.state.HEAD?.commit });
+        const sub = repo.state.onDidChange(() => onRepoStateChange(context, repo, tracker));
+        repoDisposables.set(repo, sub);
+    };
+
+    for (const repo of api.repositories) watchRepo(repo);
+
+    context.subscriptions.push(
+        api.onDidOpenRepository((repo) => watchRepo(repo)),
+        api.onDidCloseRepository((repo) => {
+            tracker.forget(repo.rootUri.toString());
+            const sub = repoDisposables.get(repo);
+            if (sub) {
+                sub.dispose();
+                repoDisposables.delete(repo);
+            }
+        }),
+        new vscode.Disposable(() => {
+            for (const sub of repoDisposables.values()) sub.dispose();
+            repoDisposables.clear();
+        }),
+    );
+}
+
+function onRepoStateChange(
+    context: vscode.ExtensionContext,
+    repo: GitRepository,
+    tracker: HeadTracker,
+): void {
+    const repoId = repo.rootUri.toString();
+    const moved = tracker.observe({ repoId, headCommit: repo.state.HEAD?.commit });
+    if (!moved) return;
+    if (!panel || !currentTarget) return;
+    // Tree-diff already has its own watcher in updateRepoWatcher that fires
+    // on any repo state change (including HEAD moves) and naturally invalidates
+    // via shouldRefreshOnRepoStateEvent. Widening this gate to include 'tree'
+    // would double-fire on commits.
+    if (currentTarget.kind !== 'diff') return;
+    if (!uriIsInsideRepoRoot(currentTarget.uri, repo.rootUri)) return;
+
+    if (headDebounce) clearTimeout(headDebounce);
+    const target = currentTarget;
+    headDebounce = setTimeout(() => {
+        // Guard against re-entering while a narration is mid-flight. The
+        // in-flight narration will be cancelled by runNarration, but we
+        // still want to wait for it to settle before kicking off another
+        // one to avoid a chain of cancellations on a rapid sequence of
+        // commits.
+        if (narrationInProgress) {
+            headDebounce = setTimeout(() => void runNarration(context, target, { skipCache: true }), HEAD_DEBOUNCE_MS);
+            return;
+        }
+        void runNarration(context, target, { skipCache: true });
+    }, HEAD_DEBOUNCE_MS);
+}
+
+function uriIsInsideRepoRoot(uri: vscode.Uri, rootUri: vscode.Uri): boolean {
+    if (uri.scheme !== rootUri.scheme) return false;
+    const rootPath = normalizePath(rootUri.fsPath || rootUri.path);
+    const target = normalizePath(uri.fsPath || uri.path);
+    if (rootPath === '') return false;
+    if (target === rootPath) return true;
+    const rootWithSep = rootPath.endsWith('/') ? rootPath : rootPath + '/';
+    return target.startsWith(rootWithSep);
+}
+
+function normalizePath(p: string): string {
+    return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
 interface ModelChoice extends vscode.QuickPickItem {
     pick?: { kind: 'vscodeLm'; family: string } | { kind: 'anthropic'; model: string };
 }
