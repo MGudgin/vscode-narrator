@@ -2,7 +2,7 @@
   "name": "code-narration",
   "displayName": "Code Narration",
   "description": "LLM-powered narration of code and diffs in a side pane.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "gudge",
   "license": "MIT",
   "icon": "icon.png",

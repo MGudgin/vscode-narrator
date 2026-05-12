@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0 — 2026-05-11
+
+### Added
+
+- Whole-tree diff narration mode: new `Open Tree Diff Narration` command (in the SCM title bar) narrates every changed file in the working tree against `codeNarration.diffBase` in a single pane. (#14, #51)
+- Banner-level streaming indicator surfaces in-flight LLM activity at the top of the narration pane, separate from per-section dots. (#15, #43)
+- Oversized symbols are now sub-chunked before the LLM call: when a symbol's prompt would exceed `codeNarration.maxPromptTokens`, it is split into overlapping line-range sub-chunks, each narrated independently, and the results are merged. New `codeNarration.maxPromptTokens` setting (default `50000`) controls the budget. (#19, #45)
+
+### Changed
+
+- `codeNarration.recurseSymbols` now ships per-language defaults under `auto` (the new default): container-heavy languages (C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++) recurse into child symbols; others stay top-level. Legacy boolean values (`true`/`false`) are still honored as `always`/`never`. (#39, #41)
+- Narration cache is now keyed at the section level instead of the whole-file level, so edits to one section no longer invalidate untouched sections in the same file. (#25, #54)
+
+### Fixed
+
+- `src/cache.ts` was being classified as binary by git due to an early non-text byte; the file is now plain text and diffs render normally. (#48)
+
+### Internal
+
+- Added `@vscode/test-electron` integration test harness covering real extension-host scenarios. Tier 1 covers cache hits, refresh, preamble edits, and `recurseSymbols`; tier 2 covers diff, tree-diff, and a reusable git fixture helper. (#29, #55, #56, #57)
+- Extracted the narration sink and introduced a provider factory for dependency injection, paving the way for headless test scenarios. (#53)
+
 ## 0.1.1 — 2026-05-08
 
 ### Added
