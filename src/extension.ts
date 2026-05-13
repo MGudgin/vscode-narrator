@@ -11,7 +11,7 @@ import {
     ProviderInfo,
 } from './llm/index';
 import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
-import { renderShell, renderError } from './webview';
+import { renderShell, renderError, SpeechConfig } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName } from './target';
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
@@ -71,14 +71,70 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.commands.registerCommand('codeNarration.setApiKey', () => setApiKey(context)),
         vscode.commands.registerCommand('codeNarration.pickModel', () => pickModel(context)),
         vscode.commands.registerCommand('codeNarration.clearCache', () => clearCacheCommand()),
+        vscode.commands.registerCommand('codeNarration.speak', () => speechControl('play')),
+        vscode.commands.registerCommand('codeNarration.stopSpeech', () => speechControl('stop')),
+        vscode.commands.registerCommand('codeNarration.pickVoice', () => pickVoice()),
         vscode.workspace.onDidSaveTextDocument((doc) => onSave(context, doc)),
         vscode.window.onDidChangeTextEditorSelection(onSelectionChange),
+        vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('codeNarration.speech')) onSpeechConfigChange();
+        }),
     );
     return {
         setProviderFactory(factory) {
             providerFactory = factory ?? defaultProviderFactory;
         },
     };
+}
+
+function readSpeechConfig(): SpeechConfig {
+    const cfg = vscode.workspace.getConfiguration('codeNarration.speech');
+    return {
+        enabled: cfg.get<boolean>('enabled', false),
+        autoPlay: cfg.get<boolean>('autoPlay', false),
+        voice: cfg.get<string>('voice', ''),
+        rate: cfg.get<number>('rate', 1.0),
+        pitch: cfg.get<number>('pitch', 1.0),
+    };
+}
+
+function speechControl(command: 'play' | 'pause' | 'stop'): void {
+    if (!panel) {
+        vscode.window.showInformationMessage('Open a narration first.');
+        return;
+    }
+    const speech = readSpeechConfig();
+    if (!speech.enabled) {
+        vscode.window.showWarningMessage(
+            'Speech is disabled. Enable codeNarration.speech.enabled to use spoken narration.',
+        );
+        return;
+    }
+    void panel.webview.postMessage({ kind: 'speechControl', command });
+}
+
+function onSpeechConfigChange(): void {
+    if (!panel) return;
+    const speech = readSpeechConfig();
+    void panel.webview.postMessage({ kind: 'speechConfig', ...speech });
+}
+
+async function pickVoice(): Promise<void> {
+    // The list of voices lives in the webview. Ask the user to type a name —
+    // an extension cannot enumerate Web Speech voices from the host side.
+    const cfg = vscode.workspace.getConfiguration('codeNarration.speech');
+    const current = cfg.get<string>('voice', '');
+    const value = await vscode.window.showInputBox({
+        title: 'Code Narration: Voice name',
+        prompt: 'Type a voice name as shown in the narration pane voice picker (leave empty for default).',
+        value: current,
+        ignoreFocusOut: true,
+    });
+    if (value === undefined) return;
+    await cfg.update('voice', value, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(
+        value ? `Code Narration: voice set to ${value}.` : 'Code Narration: voice cleared (using system default).',
+    );
 }
 
 export function deactivate(): void {
@@ -197,6 +253,23 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         null,
         context.subscriptions,
     );
+    panel.webview.onDidReceiveMessage(onWebviewMessage, null, context.subscriptions);
+}
+
+interface WebviewMessage {
+    kind?: string;
+    voice?: unknown;
+    rate?: unknown;
+}
+
+async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
+    if (!msg || typeof msg.kind !== 'string') return;
+    const cfg = vscode.workspace.getConfiguration('codeNarration.speech');
+    if (msg.kind === 'voiceChanged' && typeof msg.voice === 'string') {
+        await cfg.update('voice', msg.voice, vscode.ConfigurationTarget.Global);
+    } else if (msg.kind === 'rateChanged' && typeof msg.rate === 'number' && Number.isFinite(msg.rate)) {
+        await cfg.update('rate', msg.rate, vscode.ConfigurationTarget.Global);
+    }
 }
 
 async function updateRepoWatcher(context: vscode.ExtensionContext, target: NarrationTarget): Promise<void> {
@@ -241,8 +314,9 @@ async function runNarration(
     currentTarget = target;
     sectionRanges.length = 0;
     const bannerLabel = targetBannerLabel(target);
+    const speechConfig = readSpeechConfig();
     panel.title = targetTitle(target);
-    panel.webview.html = renderShell(panel.webview, targetShortName(target), bannerLabel);
+    panel.webview.html = renderShell(panel.webview, targetShortName(target), bannerLabel, speechConfig);
     panel.reveal(panel.viewColumn, true);
 
     void updateRepoWatcher(context, target);
@@ -280,6 +354,7 @@ async function runNarration(
                 err.message,
                 'Run "Code Narration: Set Anthropic API Key" from the command palette.',
                 bannerLabel,
+                speechConfig,
             );
             const choice = await vscode.window.showErrorMessage(err.message, 'Set API Key');
             if (choice === 'Set API Key') {
@@ -289,7 +364,7 @@ async function runNarration(
             return;
         }
         const message = err instanceof Error ? err.message : String(err);
-        panel.webview.html = renderError(panel.webview, message, undefined, bannerLabel);
+        panel.webview.html = renderError(panel.webview, message, undefined, bannerLabel, speechConfig);
     }
 }
 

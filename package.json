@@ -63,6 +63,23 @@
         "command": "codeNarration.clearCache",
         "title": "Clear Cache",
         "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.speak",
+        "title": "Speak Narration",
+        "category": "Code Narration",
+        "icon": "$(play)"
+      },
+      {
+        "command": "codeNarration.stopSpeech",
+        "title": "Stop Speaking",
+        "category": "Code Narration",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "codeNarration.pickVoice",
+        "title": "Pick Voice",
+        "category": "Code Narration"
       }
     ],
     "menus": {
@@ -151,6 +168,35 @@
           "default": 50000,
           "minimum": 1000,
           "description": "Token budget for a single LLM prompt body. When a symbol's prompt would exceed this, the symbol is split into overlapping line-range sub-chunks, each narrated independently, and the results are merged. Lower this for cheaper calls or to fit smaller context windows; raise it if your model has plenty of context and you want fewer cuts."
+        },
+        "codeNarration.speech.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show speech controls in the narration pane and enable text-to-speech using the system's voices (via the Web Speech API)."
+        },
+        "codeNarration.speech.autoPlay": {
+          "type": "boolean",
+          "default": false,
+          "description": "Speak narration sentences automatically as they stream in. Requires codeNarration.speech.enabled."
+        },
+        "codeNarration.speech.voice": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred voice name. Empty uses the system default. Set via the 'Code Narration: Pick Voice' command."
+        },
+        "codeNarration.speech.rate": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.5,
+          "maximum": 2.0,
+          "description": "Speech rate multiplier (0.5 = half speed, 2.0 = double speed)."
+        },
+        "codeNarration.speech.pitch": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Speech pitch multiplier (0 = lowest, 2 = highest)."
         }
       }
     }
