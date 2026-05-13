@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — 2026-05-13
+
+### Added
+
+- Spoken narration via the Web Speech API: the narration pane can now read narrations aloud using the system's voices. New banner controls (play / pause / stop, voice picker, rate slider) plus a per-section ▶ button. Sentences are buffered and emitted as they complete, so playback can start before the LLM finishes streaming. Off by default; enable with `codeNarration.speech.enabled`. (#62, #63)
+- New settings `codeNarration.speech.{enabled, autoPlay, voice, rate, pitch}`. Voice and rate picks made from the banner persist back to settings, so they survive `Refresh` and switching files.
+- New commands `Code Narration: Speak Narration`, `Stop Speaking`, and `Pick Voice`.
+
+### Internal
+
+- New `src/speech.ts` with streaming-safe sentence splitting (handles common abbreviations like `e.g.`/`Mr.`, ellipses, and decimal numbers) and a `markdownToSpeech` plain-text reducer. 20 unit tests; 2 new sink tests for the speech event channel.
+- Webview cancels its pending utterance on `pagehide` / `beforeunload` so the OS speech service stops when the pane is closed or the HTML is replaced.
+
 ## 0.2.0 — 2026-05-11
 
 ### Added
