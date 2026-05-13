@@ -84,7 +84,10 @@ describe('buildNarrationSink', () => {
         expect(webview.messages[0].kind).toBe('reset');
         expect(webview.messages[0].bannerLabel).toBe('Full file • Cached');
         expect((webview.messages[0].sections as { status: string }[])[0].status).toBe('complete');
-        expect(webview.messages[1]).toMatchObject({ kind: 'bannerStatus', status: 'complete' });
+        // A static section emits one upfront speech message with the stripped body.
+        const speech = webview.messages.find((m) => m.kind === 'speech');
+        expect(speech).toMatchObject({ kind: 'speech', sectionId: 'a', text: 'hello' });
+        expect(webview.messages.some((m) => m.kind === 'bannerStatus' && m.status === 'complete')).toBe(true);
     });
 
     test('init populates sectionRanges from sections that carry a range', () => {
@@ -170,9 +173,15 @@ describe('buildNarrationSink', () => {
         sink({ kind: 'sectionDone', sectionId: 'a' });
 
         const kinds = webview.messages.map((m) => m.kind);
-        expect(kinds).toEqual(['replace', 'sectionStatus', 'bannerStatus']);
-        expect(webview.messages[1]).toMatchObject({ sectionId: 'a', status: 'complete' });
-        expect(webview.messages[2]).toMatchObject({ status: 'complete' });
+        // The trailing partial sentence flushes as a speech message before the
+        // section transitions to complete.
+        expect(kinds).toEqual(['replace', 'speech', 'speechSectionDone', 'sectionStatus', 'bannerStatus']);
+        const speech = webview.messages.find((m) => m.kind === 'speech');
+        expect(speech).toMatchObject({ kind: 'speech', sectionId: 'a', text: 'hi' });
+        const status = webview.messages.find((m) => m.kind === 'sectionStatus');
+        expect(status).toMatchObject({ sectionId: 'a', status: 'complete' });
+        const banner = webview.messages.find((m) => m.kind === 'bannerStatus');
+        expect(banner).toMatchObject({ status: 'complete' });
     });
 
     test('sectionDone with no content emits the placeholder body', () => {
@@ -256,7 +265,47 @@ describe('buildNarrationSink', () => {
         expect(webview.messages).toEqual([
             { kind: 'replace', sectionId: 'a', bodyHtml: '' },
             { kind: 'sectionStatus', sectionId: 'a', status: 'streaming' },
+            { kind: 'speechReset', sectionId: 'a' },
         ]);
+    });
+
+    test('chunk events emit speech messages on sentence boundaries', () => {
+        const webview = makeWebview();
+        const sink = buildNarrationSink({
+            webview,
+            token: liveToken(),
+            target: fileTarget(),
+            bannerLabel: 'L',
+            sectionRanges: [],
+        });
+        sink({ kind: 'init', sections: [{ id: 'a' }] });
+        webview.messages.length = 0;
+
+        sink({ kind: 'chunk', sectionId: 'a', text: 'Hello world. ' });
+
+        const speech = webview.messages.filter((m) => m.kind === 'speech');
+        expect(speech).toEqual([
+            { kind: 'speech', sectionId: 'a', text: 'Hello world.' },
+        ]);
+    });
+
+    test('init emits an upfront speech message for the section heading', () => {
+        const webview = makeWebview();
+        const sink = buildNarrationSink({
+            webview,
+            token: liveToken(),
+            target: fileTarget(),
+            bannerLabel: 'L',
+            sectionRanges: [],
+        });
+
+        sink({
+            kind: 'init',
+            sections: [{ id: 'a', headingMarkdown: '## [foo](narrate://lines/L1)' }],
+        });
+
+        const speech = webview.messages.find((m) => m.kind === 'speech');
+        expect(speech).toMatchObject({ kind: 'speech', sectionId: 'a', text: 'foo' });
     });
 
     test('tree target uses repoRoot as the fallback link URI for sections without their own', () => {
