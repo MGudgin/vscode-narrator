@@ -2,6 +2,7 @@ import { describe, test, expect } from 'vitest';
 import * as vscode from 'vscode';
 import {
     aggregateBannerStatus,
+    computeBannerStatus,
     isAllowedImageSrc,
     isAllowedLinkUrl,
     renderMarkdownToHtml,
@@ -41,6 +42,85 @@ describe('aggregateBannerStatus', () => {
     test('accepts any iterable, not just arrays', () => {
         const set = new Set<'queued' | 'streaming' | 'complete'>(['streaming', 'complete']);
         expect(aggregateBannerStatus(set)).toBe('streaming');
+    });
+});
+
+describe('computeBannerStatus', () => {
+    test('emits the first time around: hidden -> streaming on a fresh narration', () => {
+        expect(computeBannerStatus(['queued'], 'hidden')).toEqual({
+            next: 'streaming',
+            shouldEmit: true,
+        });
+    });
+
+    test('emits when transitioning to complete after all sections finish', () => {
+        expect(computeBannerStatus(['complete', 'complete'], 'streaming')).toEqual({
+            next: 'complete',
+            shouldEmit: true,
+        });
+    });
+
+    test('does not emit when the computed next status equals the last one', () => {
+        expect(computeBannerStatus(['queued', 'streaming'], 'streaming')).toEqual({
+            next: 'streaming',
+            shouldEmit: false,
+        });
+        expect(computeBannerStatus(['complete'], 'complete')).toEqual({
+            next: 'complete',
+            shouldEmit: false,
+        });
+        expect(computeBannerStatus([], 'hidden')).toEqual({
+            next: 'hidden',
+            shouldEmit: false,
+        });
+    });
+
+    test('emits hidden when the section set is cleared after a streaming run', () => {
+        expect(computeBannerStatus([], 'streaming')).toEqual({
+            next: 'hidden',
+            shouldEmit: true,
+        });
+    });
+
+    test('rapid refresh: complete -> hidden -> streaming sequence emits each transition', () => {
+        // 1) finished narration is showing complete
+        const a = computeBannerStatus(['complete'], 'complete');
+        expect(a).toEqual({ next: 'complete', shouldEmit: false });
+        // 2) Refresh clears the section state map: complete -> hidden
+        const b = computeBannerStatus([], 'complete');
+        expect(b).toEqual({ next: 'hidden', shouldEmit: true });
+        // 3) New init populates queued sections: hidden -> streaming
+        const c = computeBannerStatus(['queued', 'queued'], b.next);
+        expect(c).toEqual({ next: 'streaming', shouldEmit: true });
+    });
+
+    test('table-driven coverage of (statuses x last) combinations', () => {
+        type Row = {
+            statuses: ('queued' | 'streaming' | 'complete')[];
+            last: 'hidden' | 'streaming' | 'complete';
+            next: 'hidden' | 'streaming' | 'complete';
+            shouldEmit: boolean;
+        };
+        const rows: Row[] = [
+            { statuses: [], last: 'hidden', next: 'hidden', shouldEmit: false },
+            { statuses: [], last: 'streaming', next: 'hidden', shouldEmit: true },
+            { statuses: [], last: 'complete', next: 'hidden', shouldEmit: true },
+            { statuses: ['queued'], last: 'hidden', next: 'streaming', shouldEmit: true },
+            { statuses: ['queued'], last: 'streaming', next: 'streaming', shouldEmit: false },
+            { statuses: ['queued'], last: 'complete', next: 'streaming', shouldEmit: true },
+            { statuses: ['streaming'], last: 'hidden', next: 'streaming', shouldEmit: true },
+            { statuses: ['streaming'], last: 'streaming', next: 'streaming', shouldEmit: false },
+            { statuses: ['streaming'], last: 'complete', next: 'streaming', shouldEmit: true },
+            { statuses: ['complete'], last: 'hidden', next: 'complete', shouldEmit: true },
+            { statuses: ['complete'], last: 'streaming', next: 'complete', shouldEmit: true },
+            { statuses: ['complete'], last: 'complete', next: 'complete', shouldEmit: false },
+        ];
+        for (const r of rows) {
+            expect(computeBannerStatus(r.statuses, r.last)).toEqual({
+                next: r.next,
+                shouldEmit: r.shouldEmit,
+            });
+        }
     });
 });
 

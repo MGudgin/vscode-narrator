@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { NarrationSink } from './narrate';
 import { NarrationTarget } from './target';
-import { renderMarkdownToHtml, aggregateBannerStatus, BannerStatus, SectionStatus } from './webview';
+import { renderMarkdownToHtml, computeBannerStatus, BannerStatus, SectionStatus } from './webview';
 import { fixupLinks } from './prompt';
 import { SentenceBuffer, markdownToSpeech } from './speech';
 
@@ -32,10 +32,11 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
     const fallbackLinkUri = target.kind === 'tree' ? target.repoRoot : target.uri;
 
     const syncBannerStatus = (): void => {
-        const next = aggregateBannerStatus(
+        const { next, shouldEmit } = computeBannerStatus(
             Array.from(sectionState.values(), (s) => s.status),
+            lastBannerStatus,
         );
-        if (next === lastBannerStatus) return;
+        if (!shouldEmit) return;
         lastBannerStatus = next;
         void webview.postMessage({ kind: 'bannerStatus', status: next });
     };
