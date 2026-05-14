@@ -235,5 +235,9 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
     "markdown-it": "^14.1.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.5"
   }
 }
