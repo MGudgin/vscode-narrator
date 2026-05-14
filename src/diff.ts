@@ -168,6 +168,46 @@ export async function watchRepoState(repoRoot: vscode.Uri, listener: RepoStateLi
     return repo.state.onDidChange(() => listener(repo.rootUri));
 }
 
+export interface RepoStateDecisionArgs {
+    /** The repoRoot reported by the state-change event. */
+    eventRepoRoot: vscode.Uri;
+    /**
+     * The currently active narration target, if any. Loosely typed so this
+     * pure helper does not pull in `target.ts`; callers pass their concrete
+     * `NarrationTarget` and the only fields read are `kind` and (when
+     * `kind === 'tree'`) `repoRoot`.
+     */
+    currentTarget:
+        | { kind: 'tree'; repoRoot: vscode.Uri }
+        | { kind: string; [key: string]: unknown }
+        | undefined;
+    /** Whether the watcher has already absorbed its first (priming) event. */
+    primed: boolean;
+}
+
+export interface RepoStateDecision {
+    /** If true, the caller should mark the watcher primed and not refresh. */
+    primeNow: boolean;
+    /** If true, the caller should schedule a debounced re-narration. */
+    refresh: boolean;
+}
+
+/**
+ * Pure decision logic for `updateRepoWatcher`. Extracted so the
+ * priming-vs-refresh policy can be table-driven in unit tests without
+ * driving vscode.git's state events.
+ */
+export function shouldRefreshOnRepoStateEvent(args: RepoStateDecisionArgs): RepoStateDecision {
+    if (!args.primed) return { primeNow: true, refresh: false };
+    const target = args.currentTarget;
+    if (!target || target.kind !== 'tree') return { primeNow: false, refresh: false };
+    const treeTarget = target as { kind: 'tree'; repoRoot: vscode.Uri };
+    if (treeTarget.repoRoot.toString() !== args.eventRepoRoot.toString()) {
+        return { primeNow: false, refresh: false };
+    }
+    return { primeNow: false, refresh: true };
+}
+
 function pickRepoForRoot(api: GitAPI, repoRoot: vscode.Uri): GitRepository | undefined {
     const target = repoRoot.toString();
     return api.repositories.find((r) => r.rootUri.toString() === target)
