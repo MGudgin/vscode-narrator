@@ -3,7 +3,33 @@ import * as crypto from 'crypto';
 import MarkdownIt from 'markdown-it';
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
-md.validateLink = (url: string) => /^(https?:|command:|vscode:|file:|mailto:)/i.test(url);
+
+/**
+ * Allowlist for markdown link URLs inside narration output. Narration is
+ * LLM-generated and indirectly influenced by the source files being narrated,
+ * so the link surface has to be treated as adversarial input.
+ *
+ * Permitted:
+ * - `http(s):` and `mailto:` — standard outbound links.
+ * - `command:codeNarration.reveal?…` — produced by `fixupLinks` to wire
+ *   heading and inline links to the reveal handler.
+ *
+ * Rejected (downgraded to plain text by markdown-it):
+ * - Any other `command:` URI — would otherwise execute arbitrary VS Code
+ *   commands (terminal-send, settings, file open, etc.) on click.
+ *   The webview also runs with `enableCommandUris: ['codeNarration.reveal']`,
+ *   so a renderer regression here still cannot fire foreign commands.
+ * - `file:` — clickable disclosure of any file the VS Code process can read.
+ * - `vscode:` — pivots through other installed extensions' URL handlers.
+ */
+export function isAllowedLinkUrl(url: string): boolean {
+    if (/^https?:/i.test(url)) return true;
+    if (/^mailto:/i.test(url)) return true;
+    if (/^command:codeNarration\.reveal\?/i.test(url)) return true;
+    return false;
+}
+
+md.validateLink = isAllowedLinkUrl;
 
 export interface SpeechConfig {
     enabled: boolean;

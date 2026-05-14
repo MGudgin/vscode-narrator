@@ -5,6 +5,7 @@ import {
     targetBannerLabel,
     targetMatchesSavedDoc,
     targetShortName,
+    isAllowedRevealUri,
     NarrationTarget,
 } from './target';
 
@@ -87,5 +88,68 @@ describe('targetMatchesSavedDoc', () => {
     test('tree target does not match siblings of the repo root', () => {
         const sibling = vscode.Uri.parse('file:///foo/repo-other/src/index.ts') as unknown as vscode.Uri;
         expect(targetMatchesSavedDoc(treeTarget, sibling)).toBe(false);
+    });
+});
+
+describe('isAllowedRevealUri — regression for #70', () => {
+    test('rejects when no narration target is active', () => {
+        const uri = vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(uri, undefined)).toBe(false);
+    });
+
+    test('rejects schemes other than file: and untitled:', () => {
+        const cases = [
+            'http://example.com/x',
+            'https://example.com/x',
+            'vscode-userdata:/foo/bar',
+            'git:/foo/bar?{}',
+            'data:text/plain,hi',
+            'javascript:alert(1)',
+        ];
+        for (const u of cases) {
+            const uri = vscode.Uri.parse(u) as unknown as vscode.Uri;
+            expect(isAllowedRevealUri(uri, fileTarget)).toBe(false);
+        }
+    });
+
+    test('file target: matches its own URI, rejects siblings', () => {
+        const same = vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri;
+        const other = vscode.Uri.parse('file:///foo/bar/qux.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(same, fileTarget)).toBe(true);
+        expect(isAllowedRevealUri(other, fileTarget)).toBe(false);
+    });
+
+    test('file target: rejects an attempt to escape via absolute path traversal', () => {
+        // The classic indirect-injection payload from #70: a hand-crafted reveal
+        // pointing at a sensitive file outside the narration target.
+        const passwd = vscode.Uri.parse('file:///etc/passwd') as unknown as vscode.Uri;
+        const aws = vscode.Uri.parse('file:///c:/users/u/.aws/credentials') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(passwd, fileTarget)).toBe(false);
+        expect(isAllowedRevealUri(aws, fileTarget)).toBe(false);
+    });
+
+    test('diff target: matches its own URI, rejects siblings', () => {
+        const same = vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri;
+        const other = vscode.Uri.parse('file:///foo/bar/qux.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(same, diffTarget)).toBe(true);
+        expect(isAllowedRevealUri(other, diffTarget)).toBe(false);
+    });
+
+    test('tree target: matches files inside the repo root', () => {
+        const inside = vscode.Uri.parse('file:///foo/repo/src/index.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(inside, treeTarget)).toBe(true);
+    });
+
+    test('tree target: rejects files outside the repo root', () => {
+        const sibling = vscode.Uri.parse('file:///foo/repo-other/x.ts') as unknown as vscode.Uri;
+        const passwd = vscode.Uri.parse('file:///etc/passwd') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(sibling, treeTarget)).toBe(false);
+        expect(isAllowedRevealUri(passwd, treeTarget)).toBe(false);
+    });
+
+    test('untitled: documents are permitted when they are the file target', () => {
+        const untitled = vscode.Uri.parse('untitled:Untitled-1') as unknown as vscode.Uri;
+        const untitledTarget: NarrationTarget = { kind: 'file', uri: untitled };
+        expect(isAllowedRevealUri(untitled, untitledTarget)).toBe(true);
     });
 });

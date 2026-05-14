@@ -15,6 +15,25 @@ export function targetMatchesSavedDoc(target: NarrationTarget, savedUri: vscode.
     }
 }
 
+/**
+ * Allowlist predicate for the `codeNarration.reveal` command handler.
+ *
+ * Reveal links are produced by `fixupLinks` from `narrate://lines/...` markers
+ * the LLM emits, using the active narration target's URI. An attacker who
+ * influences narration output (via indirect prompt injection in the source
+ * being narrated) could otherwise hand-craft
+ * `command:codeNarration.reveal?["file:///etc/passwd",…]` and open arbitrary
+ * files when the user clicks the rendered link. This predicate enforces that
+ * the URI being revealed (a) uses a scheme the extension actually narrates
+ * and (b) refers to the same document (or, for tree mode, a path inside the
+ * watched repo) that the current narration is about.
+ */
+export function isAllowedRevealUri(uri: vscode.Uri, target: NarrationTarget | undefined): boolean {
+    if (uri.scheme !== 'file' && uri.scheme !== 'untitled') return false;
+    if (!target) return false;
+    return targetMatchesSavedDoc(target, uri);
+}
+
 export function targetTitle(target: NarrationTarget): string {
     switch (target.kind) {
         case 'file': return `Narration: ${shortName(target.uri)}`;
