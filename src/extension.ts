@@ -14,7 +14,7 @@ import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri } from './target';
 import { NarrationCache } from './cache';
-import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
+import { findRepoRootForUri, listRepoRoots, watchRepoState, shouldRefreshOnRepoStateEvent } from './diff';
 import { buildNarrationSink } from './sink';
 
 export type ProviderFactory = (
@@ -318,12 +318,16 @@ async function updateRepoWatcher(context: vscode.ExtensionContext, target: Narra
     if (target.kind !== 'tree') return;
 
     const watcher = await watchRepoState(target.repoRoot, (repoRoot) => {
-        if (!repoWatcherPrimed) {
+        const decision = shouldRefreshOnRepoStateEvent({
+            eventRepoRoot: repoRoot,
+            currentTarget,
+            primed: repoWatcherPrimed,
+        });
+        if (decision.primeNow) {
             repoWatcherPrimed = true;
             return;
         }
-        if (!currentTarget || currentTarget.kind !== 'tree') return;
-        if (currentTarget.repoRoot.toString() !== repoRoot.toString()) return;
+        if (!decision.refresh || !currentTarget) return;
         if (repoStateDebounce) clearTimeout(repoStateDebounce);
         const t = currentTarget;
         repoStateDebounce = setTimeout(() => void runNarration(context, t), REPO_STATE_DEBOUNCE_MS);

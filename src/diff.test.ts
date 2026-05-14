@@ -6,6 +6,7 @@ import {
     findRepoRootForUri,
     listRepoRoots,
     watchRepoState,
+    shouldRefreshOnRepoStateEvent,
 } from './diff';
 
 const vscodeMock = vscode as unknown as {
@@ -403,5 +404,120 @@ describe('watchRepoState', () => {
         repo.fireStateChange();
         // No additional calls after disposal.
         expect(listener).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('shouldRefreshOnRepoStateEvent', () => {
+    const repoA = vscode.Uri.parse('file:///repo-a') as unknown as vscode.Uri;
+    const repoB = vscode.Uri.parse('file:///repo-b') as unknown as vscode.Uri;
+    const fileUri = vscode.Uri.parse('file:///repo-a/src/x.ts') as unknown as vscode.Uri;
+
+    test('the first event primes the watcher and does not refresh', () => {
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: { kind: 'tree', repoRoot: repoA },
+                primed: false,
+            }),
+        ).toEqual({ primeNow: true, refresh: false });
+    });
+
+    test('primes regardless of the current target shape', () => {
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: undefined,
+                primed: false,
+            }),
+        ).toEqual({ primeNow: true, refresh: false });
+
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: { kind: 'file', uri: fileUri },
+                primed: false,
+            }),
+        ).toEqual({ primeNow: true, refresh: false });
+    });
+
+    test('after priming, no current target means no refresh', () => {
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: undefined,
+                primed: true,
+            }),
+        ).toEqual({ primeNow: false, refresh: false });
+    });
+
+    test('after priming, non-tree targets are ignored', () => {
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: { kind: 'file', uri: fileUri },
+                primed: true,
+            }),
+        ).toEqual({ primeNow: false, refresh: false });
+
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: { kind: 'diff', uri: fileUri, baseRef: 'HEAD' },
+                primed: true,
+            }),
+        ).toEqual({ primeNow: false, refresh: false });
+    });
+
+    test('after priming, tree target for a different repo is ignored', () => {
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoB,
+                currentTarget: { kind: 'tree', repoRoot: repoA },
+                primed: true,
+            }),
+        ).toEqual({ primeNow: false, refresh: false });
+    });
+
+    test('after priming, tree target for the same repo refreshes', () => {
+        expect(
+            shouldRefreshOnRepoStateEvent({
+                eventRepoRoot: repoA,
+                currentTarget: { kind: 'tree', repoRoot: repoA },
+                primed: true,
+            }),
+        ).toEqual({ primeNow: false, refresh: true });
+    });
+
+    test('table-driven coverage of (primed x target.kind x root-match)', () => {
+        type Row = {
+            primed: boolean;
+            target:
+                | { kind: 'tree'; repoRoot: vscode.Uri }
+                | { kind: string; [key: string]: unknown }
+                | undefined;
+            eventRoot: vscode.Uri;
+            primeNow: boolean;
+            refresh: boolean;
+        };
+        const rows: Row[] = [
+            { primed: false, target: undefined, eventRoot: repoA, primeNow: true, refresh: false },
+            { primed: false, target: { kind: 'tree', repoRoot: repoA }, eventRoot: repoA, primeNow: true, refresh: false },
+            { primed: false, target: { kind: 'file' }, eventRoot: repoA, primeNow: true, refresh: false },
+            { primed: true, target: undefined, eventRoot: repoA, primeNow: false, refresh: false },
+            { primed: true, target: { kind: 'file' }, eventRoot: repoA, primeNow: false, refresh: false },
+            { primed: true, target: { kind: 'diff' }, eventRoot: repoA, primeNow: false, refresh: false },
+            { primed: true, target: { kind: 'tree', repoRoot: repoA }, eventRoot: repoB, primeNow: false, refresh: false },
+            { primed: true, target: { kind: 'tree', repoRoot: repoB }, eventRoot: repoA, primeNow: false, refresh: false },
+            { primed: true, target: { kind: 'tree', repoRoot: repoA }, eventRoot: repoA, primeNow: false, refresh: true },
+        ];
+        for (const r of rows) {
+            expect(
+                shouldRefreshOnRepoStateEvent({
+                    eventRepoRoot: r.eventRoot,
+                    currentTarget: r.target,
+                    primed: r.primed,
+                }),
+            ).toEqual({ primeNow: r.primeNow, refresh: r.refresh });
+        }
     });
 });
