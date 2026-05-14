@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import { ProviderInfo } from './llm/index';
+import { PROMPT_VERSION } from './prompt';
 
-export const PROMPT_VERSION = 2;
 const MAX_ENTRIES = 200;
 const STATE_KEY = 'codeNarration.cache.v1';
 const KEY_SEPARATOR = '\x1f';

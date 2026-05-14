@@ -4,6 +4,10 @@ import { TreeChange } from './diff';
 
 const MAX_COMBINED_DIFF_CHARS = 12000;
 
+// Bump whenever any prompt string in this file changes meaningfully, so
+// cached narrations produced under the old prompt are invalidated.
+export const PROMPT_VERSION = 2;
+
 export const SYSTEM_PROMPT = `You are a code narrator. Given a source file, produce a clear narration in GitHub-flavored markdown for a developer reading the code on the left.
 
 Output rules:
