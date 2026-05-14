@@ -752,6 +752,20 @@ export function aggregateBannerStatus(statuses: Iterable<SectionStatus>): Banner
     return anyPending ? 'streaming' : 'complete';
 }
 
+/**
+ * Pure helper that maps an iterable of section statuses + the last-emitted
+ * banner status to the next banner status and whether the caller should
+ * post a `bannerStatus` message. Extracting the emit decision from the
+ * sink makes both branches table-testable without driving postMessage.
+ */
+export function computeBannerStatus(
+    statuses: Iterable<SectionStatus>,
+    last: BannerStatus,
+): { next: BannerStatus; shouldEmit: boolean } {
+    const next = aggregateBannerStatus(statuses);
+    return { next, shouldEmit: next !== last };
+}
+
 function banner(label?: string, speech: SpeechConfig = DEFAULT_SPEECH_CONFIG): string {
     if (!label) return '';
     const refresh = `command:codeNarration.refresh`;
