@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as util from 'util';
 import * as vscode from 'vscode';
 
-const exec = util.promisify(cp.exec);
+const execFile = util.promisify(cp.execFile);
 
 export interface GitFixture {
     /** Absolute filesystem path of the temp repo. */
@@ -30,10 +30,12 @@ export interface GitFixture {
 export async function createGitFixture(): Promise<GitFixture> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'narrator-git-'));
 
-    const git = async (...args: string[]) => {
-        const quoted = args.map((a) => (/[\s"]/.test(a) ? JSON.stringify(a) : a)).join(' ');
-        return exec(`git ${quoted}`, { cwd: dir });
-    };
+    // execFile launches git directly (no shell), so args containing spaces,
+    // quotes, or shell metacharacters (`$`, backtick, `!`, …) are passed
+    // verbatim. The previous `exec` + JSON.stringify quoting was safe for the
+    // current call sites but a footgun for future fixtures that might carry
+    // user-derived paths.
+    const git = (...args: string[]) => execFile('git', args, { cwd: dir });
 
     await git('init', '-q', '-b', 'main');
     await git('config', 'user.email', 'test@example.com');

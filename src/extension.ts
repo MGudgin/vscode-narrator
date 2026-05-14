@@ -12,7 +12,7 @@ import {
 } from './llm/index';
 import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
-import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName } from './target';
+import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri } from './target';
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
 import { buildNarrationSink } from './sink';
@@ -235,7 +235,13 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         'Narration',
         { viewColumn: initialColumn, preserveFocus: true },
         {
-            enableCommandUris: true,
+            // Allowlist of command URIs the webview is permitted to invoke.
+            // Narration output is LLM-generated and partly attacker-influenced
+            // (via indirect prompt injection in the source being narrated), so
+            // `command:` URIs are restricted to the single reveal handler the
+            // extension actually emits. Paired with the link allowlist in
+            // `isAllowedLinkUrl` and the URI validation in `revealLocation`.
+            enableCommandUris: ['codeNarration.reveal'],
             enableScripts: true,
             retainContextWhenHidden: true,
         },
@@ -260,6 +266,7 @@ interface WebviewMessage {
     kind?: string;
     voice?: unknown;
     rate?: unknown;
+    url?: unknown;
 }
 
 async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
@@ -269,6 +276,33 @@ async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
         await cfg.update('voice', msg.voice, vscode.ConfigurationTarget.Global);
     } else if (msg.kind === 'rateChanged' && typeof msg.rate === 'number' && Number.isFinite(msg.rate)) {
         await cfg.update('rate', msg.rate, vscode.ConfigurationTarget.Global);
+    } else if (msg.kind === 'openExternal' && typeof msg.url === 'string') {
+        await confirmAndOpenExternalLink(msg.url);
+    }
+}
+
+async function confirmAndOpenExternalLink(url: string): Promise<void> {
+    // Narration is LLM-generated and partly attacker-influenced, so the
+    // link's visible text can be anything ("Read more", "Click here") while
+    // the href points at an exfil URL. Show the full URL in the modal so
+    // the user can see what they're about to navigate to. See #94.
+    if (!/^https?:/i.test(url) && !/^mailto:/i.test(url)) {
+        // Unexpected scheme — webview should never post this, but ignore
+        // defensively rather than blindly opening.
+        return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+        `Open external link?\n\n${url}`,
+        { modal: true },
+        'Open',
+    );
+    if (choice !== 'Open') return;
+    try {
+        const parsed = vscode.Uri.parse(url, true);
+        await vscode.env.openExternal(parsed);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Code Narration: could not open link — ${message}`);
     }
 }
 
@@ -501,7 +535,21 @@ async function revealLocation(
     uriStr: string,
     rangeLike: { start: { line: number; character: number }; end: { line: number; character: number } },
 ): Promise<void> {
-    const uri = vscode.Uri.parse(uriStr);
+    let uri: vscode.Uri;
+    try {
+        uri = vscode.Uri.parse(uriStr, true);
+    } catch {
+        return;
+    }
+    // Reveal links are only safe to honour when they point at the document
+    // the narration is currently about. A hand-crafted reveal payload could
+    // otherwise open arbitrary files via Uri.parse.
+    if (!isAllowedRevealUri(uri, currentTarget)) {
+        console.warn(
+            `codeNarration: refused to reveal ${uri.toString()} — not under the active narration target.`,
+        );
+        return;
+    }
     const doc = await vscode.workspace.openTextDocument(uri);
     const range = new vscode.Range(
         rangeLike.start.line,

