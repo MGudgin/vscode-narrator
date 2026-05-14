@@ -63,6 +63,38 @@ export function isAllowedImageSrc(src: string): boolean {
     return /^data:image\//i.test(src);
 }
 
+/**
+ * `JSON.stringify` is NOT safe to embed directly inside an inline `<script>`
+ * element. A string value containing the literal `</script>` (which survives
+ * `JSON.stringify` verbatim) closes the script tag, and any HTML that follows
+ * is parsed as body content. The closest LLM-accessible vector is via a
+ * workspace's `.vscode/settings.json` — e.g. `codeNarration.speech.voice` is
+ * embedded into the script that boots the speech client.
+ *
+ * Escape the four sequences that matter for `<script>`-embedded JSON:
+ * - `<` → `<` to neutralise `</script>` (and `<!--`, `<script>`).
+ * - `>` → `>` for defence in depth.
+ * - U+2028 / U+2029 → escaped Unicode forms. Legal in JSON strings but
+ *   terminate JavaScript string literals when the embedded JSON is parsed
+ *   as a JS expression.
+ *
+ * The escaped form is still valid JSON; the JavaScript engine decodes the
+ * Unicode escapes back to the original characters when evaluating the
+ * `=` expression, so consumers of `window.__speechConfig` see no difference.
+ *
+ * See #96. The webview CSP (`script-src 'nonce-…'`) prevents code execution
+ * even if a breakout occurred, but does not prevent inert HTML insertion
+ * (`<img>`, `<a>`, defacement) — so this is defence in depth, not the only
+ * line.
+ */
+export function safeJsonForScriptElement(value: unknown): string {
+    return JSON.stringify(value)
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
+}
+
 // Replace markdown-it's default image renderer with one that drops any
 // <img> whose src is not in `isAllowedImageSrc`. The alt text is preserved
 // as escaped plain text so the reader still sees that something was there.
@@ -570,7 +602,7 @@ ${banner(bannerLabel, speechConfig)}
   <p class="status">Calling the language model.</p>
 </div>
 <script nonce="${nonce}">
-  window.__speechConfig = ${JSON.stringify(speechConfig)};
+  window.__speechConfig = ${safeJsonForScriptElement(speechConfig)};
   // acquireVsCodeApi may only be called once per webview lifecycle. Hoisting
   // the call here lets both the speech client and the link-intercept script
   // share the same handle.

