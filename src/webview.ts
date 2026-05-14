@@ -29,7 +29,47 @@ export function isAllowedLinkUrl(url: string): boolean {
     return false;
 }
 
-md.validateLink = isAllowedLinkUrl;
+// markdown-it routes every `<a href>` AND every `<img src>` through one
+// `validateLink` gate, so the predicate is the union of what's safe as a link
+// and what's safe as an image. The renderer-rule override below adds a second
+// gate that ensures `data:image/` only ever becomes an `<img>` — not an `<a>`
+// that surprises the user, and not a non-image `data:` URI.
+md.validateLink = (url: string) => isAllowedLinkUrl(url) || isAllowedImageSrc(url);
+
+/**
+ * Allowlist for markdown image `src` URLs. Distinct from `isAllowedLinkUrl`
+ * because images are auto-fetched on render — no user click required — so the
+ * allowlist must be strictly tighter:
+ *
+ * Permitted:
+ * - `data:image/...` URIs (inline base64, no network fetch).
+ *
+ * Rejected (the `<img>` tag is dropped at render time, alt text is rendered
+ * as escaped plain text instead):
+ * - `https?:` — would fire a `GET` to an attacker-controlled URL on render,
+ *   leaking whatever the LLM has in context. The webview's CSP also drops
+ *   `https:` from `img-src`, so a renderer regression would still be refused
+ *   at fetch time.
+ * - Any other scheme.
+ */
+export function isAllowedImageSrc(src: string): boolean {
+    return /^data:image\//i.test(src);
+}
+
+// Replace markdown-it's default image renderer with one that drops any
+// <img> whose src is not in `isAllowedImageSrc`. The alt text is preserved
+// as escaped plain text so the reader still sees that something was there.
+const defaultImageRule = md.renderer.rules.image;
+md.renderer.rules.image = (tokens, idx, opts, env, self) => {
+    const src = tokens[idx].attrGet('src') ?? '';
+    if (!isAllowedImageSrc(src)) {
+        const alt = tokens[idx].content;
+        return alt ? `[image: ${md.utils.escapeHtml(alt)}]` : '';
+    }
+    return defaultImageRule
+        ? defaultImageRule(tokens, idx, opts, env, self)
+        : self.renderToken(tokens, idx, opts);
+};
 
 export interface SpeechConfig {
     enabled: boolean;
@@ -500,7 +540,12 @@ export function renderShell(
         `default-src 'none'`,
         `style-src ${webview.cspSource} 'unsafe-inline'`,
         `script-src 'nonce-${nonce}'`,
-        `img-src ${webview.cspSource} https: data:`,
+        // No `https:` here — narration never legitimately renders remote
+        // images, and allowing them turns an attacker-influenced `<img>` tag
+        // into a no-click exfiltration channel (LLM emits a tracking pixel
+        // whose URL encodes context, browser fetches on render). Pairs with
+        // the markdown image renderer override in `isAllowedImageSrc`.
+        `img-src ${webview.cspSource} data:`,
     ].join('; ');
 
     return `<!DOCTYPE html>
@@ -597,7 +642,12 @@ export function renderError(
     const csp = [
         `default-src 'none'`,
         `style-src ${webview.cspSource} 'unsafe-inline'`,
-        `img-src ${webview.cspSource} https: data:`,
+        // No `https:` here — narration never legitimately renders remote
+        // images, and allowing them turns an attacker-influenced `<img>` tag
+        // into a no-click exfiltration channel (LLM emits a tracking pixel
+        // whose URL encodes context, browser fetches on render). Pairs with
+        // the markdown image renderer override in `isAllowedImageSrc`.
+        `img-src ${webview.cspSource} data:`,
     ].join('; ');
     const hintHtml = hint ? `<p>${escapeHtml(hint)}</p>` : '';
     return `<!DOCTYPE html>
