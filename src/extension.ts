@@ -12,7 +12,7 @@ import {
 } from './llm/index';
 import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
-import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName } from './target';
+import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri } from './target';
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
 import { buildNarrationSink } from './sink';
@@ -235,7 +235,13 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         'Narration',
         { viewColumn: initialColumn, preserveFocus: true },
         {
-            enableCommandUris: true,
+            // Allowlist of command URIs the webview is permitted to invoke.
+            // Narration output is LLM-generated and partly attacker-influenced
+            // (via indirect prompt injection in the source being narrated), so
+            // `command:` URIs are restricted to the single reveal handler the
+            // extension actually emits. Paired with the link allowlist in
+            // `isAllowedLinkUrl` and the URI validation in `revealLocation`.
+            enableCommandUris: ['codeNarration.reveal'],
             enableScripts: true,
             retainContextWhenHidden: true,
         },
@@ -501,7 +507,21 @@ async function revealLocation(
     uriStr: string,
     rangeLike: { start: { line: number; character: number }; end: { line: number; character: number } },
 ): Promise<void> {
-    const uri = vscode.Uri.parse(uriStr);
+    let uri: vscode.Uri;
+    try {
+        uri = vscode.Uri.parse(uriStr, true);
+    } catch {
+        return;
+    }
+    // Reveal links are only safe to honour when they point at the document
+    // the narration is currently about. A hand-crafted reveal payload could
+    // otherwise open arbitrary files via Uri.parse.
+    if (!isAllowedRevealUri(uri, currentTarget)) {
+        console.warn(
+            `codeNarration: refused to reveal ${uri.toString()} — not under the active narration target.`,
+        );
+        return;
+    }
     const doc = await vscode.workspace.openTextDocument(uri);
     const range = new vscode.Range(
         rangeLike.start.line,
