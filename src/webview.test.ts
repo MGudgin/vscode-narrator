@@ -114,6 +114,46 @@ describe('renderMarkdownToHtml — regression for #68/#69', () => {
     });
 });
 
+describe('renderMarkdownToHtml — linkify auto-link (#94)', () => {
+    // markdown-it's `linkify: true` would auto-convert plain-text URLs into
+    // <a> tags. Narration is LLM-generated and partly attacker-influenced, so
+    // an LLM emitting `Read more at https://attacker.example/?leak=DATA` in
+    // flowing prose would become a one-click exfil channel without explicit
+    // `[text](url)` markdown. With linkify disabled, plain-text URLs stay as
+    // plain text.
+    test('plain-text https URL in prose is NOT auto-converted to a link', () => {
+        const html = renderMarkdownToHtml('Read more at https://attacker.example/?leak=DATA');
+        expect(html).not.toMatch(/<a\s[^>]*href="https:\/\/attacker/i);
+    });
+
+    test('plain-text http URL in prose is NOT auto-converted to a link', () => {
+        const html = renderMarkdownToHtml('See http://attacker.example/?leak=DATA');
+        expect(html).not.toMatch(/<a\s[^>]*href="http:\/\/attacker/i);
+    });
+
+    test('plain-text email in prose is NOT auto-converted to a mailto link', () => {
+        const html = renderMarkdownToHtml('Contact a@b.com for help.');
+        expect(html).not.toMatch(/<a\s[^>]*href="mailto:/i);
+    });
+
+    test('explicit markdown links still produce a working <a href>', () => {
+        // The click-intercept script (covered by integration testing, not
+        // here) gates these on a confirmation dialog. The renderer itself
+        // must still emit a usable anchor so the intercept can fire.
+        const html = renderMarkdownToHtml('[RFC 7230](https://example.org/rfc7230)');
+        expect(html).toMatch(/<a\s[^>]*href="https:\/\/example\.org\/rfc7230"/i);
+    });
+
+    test('explicit markdown link with attacker-controlled text + href still renders (intercept handles it)', () => {
+        // The renderer's job is to produce a link; the consent prompt is the
+        // user-visible safety boundary, not the markdown layer. This pins the
+        // current behaviour so a future tightening (e.g., domain allowlist)
+        // is a conscious change, not a regression.
+        const html = renderMarkdownToHtml('[Read more](https://attacker.example/?leak=DATA)');
+        expect(html).toMatch(/href="https:\/\/attacker\.example/);
+    });
+});
+
 describe('isAllowedImageSrc — regression for #91', () => {
     test('permits inline data:image/ URIs', () => {
         expect(isAllowedImageSrc('data:image/png;base64,iVBORw0KGgo')).toBe(true);

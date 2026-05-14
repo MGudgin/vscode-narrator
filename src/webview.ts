@@ -2,7 +2,14 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import MarkdownIt from 'markdown-it';
 
-const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
+// `linkify: false` so plain-text URLs in narration prose are NOT auto-converted
+// to `<a>` tags. Otherwise an LLM emitting `Read more at https://attacker.example/?leak=DATA`
+// in flowing prose (no explicit markdown link syntax required) renders as a
+// clickable anchor — a one-click exfil channel reachable via the same indirect-
+// prompt-injection chain as #68/#91. Explicit `[text](url)` markdown still
+// produces a working link; that path is gated by `openExternal` confirmation
+// in the webview script (see `renderShell`).
+const md = new MarkdownIt({ html: false, linkify: false, breaks: false });
 
 /**
  * Allowlist for markdown link URLs inside narration output. Narration is
@@ -264,7 +271,7 @@ const SPEECH_CLIENT_JS = `
     window.__speech = { enabled: false, onReset: function () {}, onMessage: function () {}, speakSection: function () {} };
     return;
   }
-  const vscodeApi = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+  const vscodeApi = window.__vscodeApi || null;
   function postToHost(msg) { if (vscodeApi) vscodeApi.postMessage(msg); }
   const synth = window.speechSynthesis;
   // Sections, in order. Each: { id, sentences: string[], done: boolean }.
@@ -564,6 +571,10 @@ ${banner(bannerLabel, speechConfig)}
 </div>
 <script nonce="${nonce}">
   window.__speechConfig = ${JSON.stringify(speechConfig)};
+  // acquireVsCodeApi may only be called once per webview lifecycle. Hoisting
+  // the call here lets both the speech client and the link-intercept script
+  // share the same handle.
+  window.__vscodeApi = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
 </script>
 <script nonce="${nonce}">${SPEECH_CLIENT_JS}</script>
 <script nonce="${nonce}">
@@ -625,6 +636,22 @@ ${banner(bannerLabel, speechConfig)}
       if (!(target instanceof HTMLElement)) return;
       const sectionId = target.getAttribute('data-speak-section');
       if (sectionId && window.__speech) window.__speech.speakSection(sectionId);
+
+      // Intercept clicks on external links so the extension can show the
+      // full URL and ask for confirmation before opening. Narration is
+      // LLM-generated and partly attacker-influenced, so a link's text and
+      // its href can be wildly different; the confirmation step makes the
+      // href visible at the consent moment. See #94.
+      const anchor = target.closest('a');
+      if (anchor && anchor instanceof HTMLAnchorElement) {
+        const href = anchor.getAttribute('href') || '';
+        if (/^https?:/i.test(href) || /^mailto:/i.test(href)) {
+          e.preventDefault();
+          if (window.__vscodeApi) {
+            window.__vscodeApi.postMessage({ kind: 'openExternal', url: href });
+          }
+        }
+      }
     });
   })();
 </script>

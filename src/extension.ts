@@ -266,6 +266,7 @@ interface WebviewMessage {
     kind?: string;
     voice?: unknown;
     rate?: unknown;
+    url?: unknown;
 }
 
 async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
@@ -275,6 +276,33 @@ async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
         await cfg.update('voice', msg.voice, vscode.ConfigurationTarget.Global);
     } else if (msg.kind === 'rateChanged' && typeof msg.rate === 'number' && Number.isFinite(msg.rate)) {
         await cfg.update('rate', msg.rate, vscode.ConfigurationTarget.Global);
+    } else if (msg.kind === 'openExternal' && typeof msg.url === 'string') {
+        await confirmAndOpenExternalLink(msg.url);
+    }
+}
+
+async function confirmAndOpenExternalLink(url: string): Promise<void> {
+    // Narration is LLM-generated and partly attacker-influenced, so the
+    // link's visible text can be anything ("Read more", "Click here") while
+    // the href points at an exfil URL. Show the full URL in the modal so
+    // the user can see what they're about to navigate to. See #94.
+    if (!/^https?:/i.test(url) && !/^mailto:/i.test(url)) {
+        // Unexpected scheme — webview should never post this, but ignore
+        // defensively rather than blindly opening.
+        return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+        `Open external link?\n\n${url}`,
+        { modal: true },
+        'Open',
+    );
+    if (choice !== 'Open') return;
+    try {
+        const parsed = vscode.Uri.parse(url, true);
+        await vscode.env.openExternal(parsed);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Code Narration: could not open link — ${message}`);
     }
 }
 
