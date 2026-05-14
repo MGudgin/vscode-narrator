@@ -152,4 +152,36 @@ describe('isAllowedRevealUri — regression for #70', () => {
         const untitledTarget: NarrationTarget = { kind: 'file', uri: untitled };
         expect(isAllowedRevealUri(untitled, untitledTarget)).toBe(true);
     });
+
+    test('tree target rejects ".." traversal even if prefix appears to match (#89)', () => {
+        const trav = vscode.Uri.parse('file:///foo/repo/../etc/passwd') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, treeTarget)).toBe(false);
+    });
+
+    test('tree target rejects deeper ".." traversal (#89)', () => {
+        const trav = vscode.Uri.parse('file:///foo/repo/../../etc/passwd') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, treeTarget)).toBe(false);
+    });
+
+    test('tree target rejects mid-path ".." traversal (#89)', () => {
+        // The traversal need not be at the start — anywhere it lands outside
+        // the repo root must be rejected.
+        const trav = vscode.Uri.parse('file:///foo/repo/src/../../etc/passwd') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, treeTarget)).toBe(false);
+    });
+
+    test('tree target accepts a path that normalizes back inside the repo (#89)', () => {
+        // `/foo/repo/a/../b/x.ts` normalizes to `/foo/repo/b/x.ts` — still
+        // inside the repo, so this remains allowed. Pins behaviour so the
+        // traversal fix doesn't accidentally reject legitimate redundant `..`.
+        const inside = vscode.Uri.parse('file:///foo/repo/a/../b/x.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(inside, treeTarget)).toBe(true);
+    });
+
+    test('file target rejects same-name URI with redundant ".." (defence in depth, #89)', () => {
+        // file/diff modes already use exact-string match, but lock the
+        // behaviour down so any future relaxation does not regress.
+        const trav = vscode.Uri.parse('file:///foo/bar/../bar/baz.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, fileTarget)).toBe(false);
+    });
 });
