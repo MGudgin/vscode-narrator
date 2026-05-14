@@ -185,3 +185,115 @@ describe('isAllowedRevealUri — regression for #70', () => {
         expect(isAllowedRevealUri(trav, fileTarget)).toBe(false);
     });
 });
+
+describe('isAllowedRevealUri — additional edge cases for #89 (Windows / UNC / encoding)', () => {
+    // The mock at `test/mocks/vscode.ts` builds `fsPath` by stripping the
+    // leading `file://` from the URI string. URIs below are chosen so the
+    // resulting fsPath exercises a specific branch of `normalize` in target.ts:
+    //   `file://c:/...`       → fsPath `c:/...`        (Windows drive-letter)
+    //   `file:////server/...` → fsPath `//server/...`  (UNC share)
+    //   `file:///FOO/...`     → fsPath `/FOO/...`      (case-sensitive POSIX)
+    // These shapes match what real VS Code's `Uri.fsPath` can produce on
+    // Windows / UNC mounts. Even though the test runs on Linux CI under the
+    // mock, the security property under test is purely textual — the
+    // `isUriUnder` prefix check must reject any candidate whose normalised
+    // path lands outside the root.
+
+    const winTreeTarget: NarrationTarget = {
+        kind: 'tree',
+        repoRoot: vscode.Uri.parse('file://c:/projects/repo') as unknown as vscode.Uri,
+        baseRef: 'origin/main',
+    };
+
+    const uncTreeTarget: NarrationTarget = {
+        kind: 'tree',
+        repoRoot: vscode.Uri.parse('file:////server/share/repo') as unknown as vscode.Uri,
+        baseRef: 'origin/main',
+    };
+
+    test('Windows drive-letter root: accepts a legitimate in-bounds file', () => {
+        const inside = vscode.Uri.parse('file://c:/projects/repo/src/index.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(inside, winTreeTarget)).toBe(true);
+    });
+
+    test('Windows drive-letter root: rejects "../.." traversal into another user-data path', () => {
+        // Classic indirect-injection payload on Windows: hop out of the repo
+        // into the user profile. `posix.normalize` collapses the `..`s to
+        // `c:/Users/u/.aws/credentials`, which does not start with the repo.
+        const trav = vscode.Uri.parse(
+            'file://c:/projects/repo/../../Users/u/.aws/credentials',
+        ) as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, winTreeTarget)).toBe(false);
+    });
+
+    test('Windows drive-letter root: uppercase drive letter on the candidate is accepted', () => {
+        // `normalize` lowercases the drive letter on both sides, so
+        // `C:/projects/repo/...` is treated as `c:/projects/repo/...`.
+        // Pin this so a future tightening doesn't reject legitimate paths
+        // VS Code emits with an uppercase drive on Windows.
+        const inside = vscode.Uri.parse('file://C:/projects/repo/src/index.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(inside, winTreeTarget)).toBe(true);
+    });
+
+    test('Windows drive-letter root: case-mismatched non-drive path component is rejected (fail-closed)', () => {
+        // Windows filesystems are case-insensitive in practice, but
+        // `normalize` only lowercases the drive letter. A candidate whose
+        // path components differ in case from the root therefore does not
+        // match. This is a fail-closed posture; pin it so we notice if it
+        // changes. The user-facing cost is that the LLM has to emit paths
+        // in the same case as the repo root.
+        const winRepoCaseTarget: NarrationTarget = {
+            kind: 'tree',
+            repoRoot: vscode.Uri.parse('file://c:/repo') as unknown as vscode.Uri,
+            baseRef: 'origin/main',
+        };
+        const other = vscode.Uri.parse('file://c:/REPO/x.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(other, winRepoCaseTarget)).toBe(false);
+    });
+
+    test('UNC root: accepts a legitimate file inside the share', () => {
+        const inside = vscode.Uri.parse('file:////server/share/repo/x.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(inside, uncTreeTarget)).toBe(true);
+    });
+
+    test('UNC root: rejects ".." traversal that escapes the repo into a sibling directory on the same share', () => {
+        const trav = vscode.Uri.parse('file:////server/share/repo/../other/file') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, uncTreeTarget)).toBe(false);
+    });
+
+    test('UNC root: rejects a different host even on a share with the same name', () => {
+        // The prefix check has to see the host as part of the path so that a
+        // candidate on `//attacker/share/...` cannot satisfy a root on
+        // `//server/share/...`.
+        const sibling = vscode.Uri.parse('file:////attacker/share/file') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(sibling, uncTreeTarget)).toBe(false);
+    });
+
+    test('tree target: redundant `//` inside the candidate path is collapsed and still allowed', () => {
+        // `posix.normalize` collapses `//` to `/`, so `/foo/repo//bar`
+        // normalises to `/foo/repo/bar` — still inside the repo. Pin this
+        // so the fix does not start rejecting paths VS Code's filesystem
+        // APIs would happily open.
+        const inside = vscode.Uri.parse('file:///foo/repo//bar') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(inside, treeTarget)).toBe(true);
+    });
+
+    test('tree target: percent-encoded path separator (%2F) is a literal — does not bypass the check', () => {
+        // `%2F` is not decoded by `normalize` or by `path.posix.normalize`.
+        // `/foo/repo%2F..%2Fetc/passwd` is therefore a single oddly-named
+        // path component, not a traversal, and does not start with
+        // `/foo/repo/` (the char after `repo` is `%`, not `/`). Defence
+        // against an attacker trying to smuggle traversal past the
+        // normaliser by URL-encoding the separator.
+        const trav = vscode.Uri.parse('file:///foo/repo%2F..%2Fetc/passwd') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(trav, treeTarget)).toBe(false);
+    });
+
+    test('tree target: case-different POSIX prefix is rejected (case-sensitive comparison)', () => {
+        // No drive letter, so the case-fold branch of `normalize` does not
+        // apply — the comparison is byte-wise. Locks in fail-closed posture
+        // for POSIX-style paths that mismatch the root's casing.
+        const other = vscode.Uri.parse('file:///FOO/repo/x.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(other, treeTarget)).toBe(false);
+    });
+});
