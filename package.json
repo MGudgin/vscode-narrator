@@ -18,6 +18,18 @@
   ],
   "activationEvents": [],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In an untrusted workspace, narration commands stay disabled because the file's contents (and, in tree mode, every changed file in the repo) are forwarded to a third-party language model. Trust the workspace to enable narration.",
+      "restrictedConfigurations": [
+        "codeNarration.provider",
+        "codeNarration.anthropic.model",
+        "codeNarration.vscodeLm.modelFamily",
+        "codeNarration.speech.voice"
+      ]
+    }
+  },
   "contributes": {
     "commands": [
       {
