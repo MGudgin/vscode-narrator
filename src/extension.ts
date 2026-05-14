@@ -12,7 +12,7 @@ import {
 } from './llm/index';
 import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
-import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri } from './target';
+import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri, shouldFollowEditor } from './target';
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState } from './diff';
 import { buildNarrationSink } from './sink';
@@ -43,6 +43,7 @@ let inFlight: vscode.CancellationTokenSource | undefined;
 let saveDebounce: NodeJS.Timeout | undefined;
 let selectionDebounce: NodeJS.Timeout | undefined;
 let repoStateDebounce: NodeJS.Timeout | undefined;
+let activeEditorDebounce: NodeJS.Timeout | undefined;
 let repoWatcher: vscode.Disposable | undefined;
 let watchedRepoRoot: string | undefined;
 let repoWatcherPrimed = false;
@@ -52,6 +53,7 @@ const sectionRanges: { id: string; range: vscode.Range }[] = [];
 const SAVE_DEBOUNCE_MS = 500;
 const SELECTION_DEBOUNCE_MS = 200;
 const REPO_STATE_DEBOUNCE_MS = 750;
+const ACTIVE_EDITOR_DEBOUNCE_MS = 250;
 
 interface RunOptions {
     skipCache?: boolean;
@@ -76,6 +78,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.commands.registerCommand('codeNarration.pickVoice', () => pickVoice()),
         vscode.workspace.onDidSaveTextDocument((doc) => onSave(context, doc)),
         vscode.window.onDidChangeTextEditorSelection(onSelectionChange),
+        vscode.window.onDidChangeActiveTextEditor((editor) => onActiveEditorChange(context, editor)),
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('codeNarration.speech')) onSpeechConfigChange();
         }),
@@ -144,6 +147,7 @@ export function deactivate(): void {
     if (saveDebounce) clearTimeout(saveDebounce);
     if (selectionDebounce) clearTimeout(selectionDebounce);
     if (repoStateDebounce) clearTimeout(repoStateDebounce);
+    if (activeEditorDebounce) clearTimeout(activeEditorDebounce);
     repoWatcher?.dispose();
     repoWatcher = undefined;
     watchedRepoRoot = undefined;
@@ -429,6 +433,30 @@ function onSave(context: vscode.ExtensionContext, doc: vscode.TextDocument): voi
     if (saveDebounce) clearTimeout(saveDebounce);
     const target = currentTarget;
     saveDebounce = setTimeout(() => void runNarration(context, target), SAVE_DEBOUNCE_MS);
+}
+
+function onActiveEditorChange(
+    context: vscode.ExtensionContext,
+    editor: vscode.TextEditor | undefined,
+): void {
+    if (!panel) return;
+    const followEnabled = vscode.workspace
+        .getConfiguration('codeNarration')
+        .get<boolean>('followActiveEditor', false);
+    const doc = editor?.document;
+    const allow = shouldFollowEditor({
+        newDocUri: doc?.uri,
+        newDocScheme: doc?.uri.scheme,
+        currentTarget,
+        followEnabled,
+    });
+    if (!allow) return;
+    if (activeEditorDebounce) clearTimeout(activeEditorDebounce);
+    const newUri = doc!.uri;
+    activeEditorDebounce = setTimeout(
+        () => void runNarration(context, { kind: 'file', uri: newUri }),
+        ACTIVE_EDITOR_DEBOUNCE_MS,
+    );
 }
 
 interface ModelChoice extends vscode.QuickPickItem {
