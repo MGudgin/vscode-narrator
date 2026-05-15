@@ -417,9 +417,7 @@ function onSelectionChange(e: vscode.TextEditorSelectionChangeEvent): void {
     if (sectionRanges.length === 0) return;
     const cursorLine = e.selections[0]?.active.line;
     if (cursorLine === undefined) return;
-    const match = sectionRanges.find(
-        (s) => cursorLine >= s.range.start.line && cursorLine <= s.range.end.line,
-    );
+    const match = findSectionForLine(sectionRanges, cursorLine);
     if (!match) return;
     if (selectionDebounce) clearTimeout(selectionDebounce);
     const matchedId = match.id;
@@ -427,6 +425,43 @@ function onSelectionChange(e: vscode.TextEditorSelectionChangeEvent): void {
         if (!panel) return;
         void panel.webview.postMessage({ kind: 'highlight', sectionId: matchedId });
     }, SELECTION_DEBOUNCE_MS);
+}
+
+export interface SectionRangeLike {
+    id: string;
+    range: { start: { line: number }; end: { line: number } };
+}
+
+/**
+ * Find the narration section that contains `cursorLine`, given a list of
+ * sections pre-sorted by `range.start.line` ascending. Returns `undefined`
+ * when no section's `[start.line, end.line]` interval covers the cursor.
+ *
+ * Binary-searches for the rightmost section whose `start.line <= cursorLine`,
+ * then verifies `end.line >= cursorLine`. With overlapping ranges this picks
+ * the section with the largest `start.line` that still encloses the cursor,
+ * which is the deterministic match.
+ */
+export function findSectionForLine<T extends SectionRangeLike>(
+    sections: readonly T[],
+    cursorLine: number,
+): T | undefined {
+    if (sections.length === 0) return undefined;
+    let lo = 0;
+    let hi = sections.length - 1;
+    let best = -1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        if (sections[mid].range.start.line <= cursorLine) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (best < 0) return undefined;
+    const candidate = sections[best];
+    return candidate.range.end.line >= cursorLine ? candidate : undefined;
 }
 
 function onSave(context: vscode.ExtensionContext, doc: vscode.TextDocument): void {
