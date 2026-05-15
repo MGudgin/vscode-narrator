@@ -152,6 +152,11 @@
           "default": true,
           "description": "Re-narrate the file when it is saved, if the narration pane is open and showing that file."
         },
+        "codeNarration.followActiveEditor": {
+          "type": "boolean",
+          "default": false,
+          "description": "When the narration pane is open in file mode, retarget it to follow the active text editor as focus moves between files. Diff and tree-diff targets remain pinned regardless of this setting."
+        },
         "codeNarration.symbolConcurrency": {
           "type": "integer",
           "default": 4,

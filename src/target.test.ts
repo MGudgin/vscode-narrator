@@ -6,6 +6,7 @@ import {
     targetMatchesSavedDoc,
     targetShortName,
     isAllowedRevealUri,
+    shouldFollowEditor,
     NarrationTarget,
 } from './target';
 
@@ -295,5 +296,116 @@ describe('isAllowedRevealUri — additional edge cases for #89 (Windows / UNC / 
         // for POSIX-style paths that mismatch the root's casing.
         const other = vscode.Uri.parse('file:///FOO/repo/x.ts') as unknown as vscode.Uri;
         expect(isAllowedRevealUri(other, treeTarget)).toBe(false);
+    });
+});
+
+describe('shouldFollowEditor', () => {
+    const fileA = vscode.Uri.parse('file:///work/a.ts') as unknown as vscode.Uri;
+    const fileB = vscode.Uri.parse('file:///work/b.ts') as unknown as vscode.Uri;
+    const untitled = vscode.Uri.parse('untitled:Untitled-1') as unknown as vscode.Uri;
+    const outputCh = vscode.Uri.parse('output:debug') as unknown as vscode.Uri;
+    const fileTargetA: NarrationTarget = { kind: 'file', uri: fileA };
+    const diffTargetA: NarrationTarget = { kind: 'diff', uri: fileA, baseRef: 'HEAD' };
+    const treeTargetA: NarrationTarget = {
+        kind: 'tree',
+        repoRoot: vscode.Uri.parse('file:///work') as unknown as vscode.Uri,
+        baseRef: 'HEAD',
+    };
+
+    test('returns false when the setting is off', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: fileB,
+                newDocScheme: 'file',
+                currentTarget: fileTargetA,
+                followEnabled: false,
+            }),
+        ).toBe(false);
+    });
+
+    test('returns false when there is no active editor', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: undefined,
+                newDocScheme: undefined,
+                currentTarget: fileTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(false);
+    });
+
+    test('returns false when no narration target is open', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: fileB,
+                newDocScheme: 'file',
+                currentTarget: undefined,
+                followEnabled: true,
+            }),
+        ).toBe(false);
+    });
+
+    test('diff and tree targets are pinned regardless of setting', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: fileB,
+                newDocScheme: 'file',
+                currentTarget: diffTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(false);
+
+        expect(
+            shouldFollowEditor({
+                newDocUri: fileB,
+                newDocScheme: 'file',
+                currentTarget: treeTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(false);
+    });
+
+    test('non-file/untitled schemes do not retarget', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: outputCh,
+                newDocScheme: 'output',
+                currentTarget: fileTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(false);
+    });
+
+    test('untitled documents do retarget', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: untitled,
+                newDocScheme: 'untitled',
+                currentTarget: fileTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(true);
+    });
+
+    test('no-op when the new doc equals the current target', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: fileA,
+                newDocScheme: 'file',
+                currentTarget: fileTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(false);
+    });
+
+    test('happy path: file target + file-scheme new doc + enabled -> retarget', () => {
+        expect(
+            shouldFollowEditor({
+                newDocUri: fileB,
+                newDocScheme: 'file',
+                currentTarget: fileTargetA,
+                followEnabled: true,
+            }),
+        ).toBe(true);
     });
 });

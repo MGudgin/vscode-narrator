@@ -35,6 +35,33 @@ export function isAllowedRevealUri(uri: vscode.Uri, target: NarrationTarget | un
     return targetMatchesSavedDoc(target, uri);
 }
 
+/**
+ * Pure predicate for the follow-active-editor feature. Returns true iff the
+ * active-editor change should cause the narration pane to retarget to the
+ * new document.
+ *
+ * Skip cases (return false):
+ * - Setting is off.
+ * - No editor / no document.
+ * - Current target is `diff` or `tree` — those are intentionally pinned.
+ * - New document scheme is not `file:` or `untitled:` (avoid webviews, output
+ *   channels, settings editors, etc.).
+ * - The new document is the same as the current target — no-op.
+ */
+export function shouldFollowEditor(args: {
+    newDocUri: vscode.Uri | undefined;
+    newDocScheme: string | undefined;
+    currentTarget: NarrationTarget | undefined;
+    followEnabled: boolean;
+}): boolean {
+    if (!args.followEnabled) return false;
+    if (!args.newDocUri || !args.newDocScheme) return false;
+    if (!args.currentTarget || args.currentTarget.kind !== 'file') return false;
+    if (args.newDocScheme !== 'file' && args.newDocScheme !== 'untitled') return false;
+    if (args.currentTarget.uri.toString() === args.newDocUri.toString()) return false;
+    return true;
+}
+
 export function targetTitle(target: NarrationTarget): string {
     switch (target.kind) {
         case 'file': return `Narration: ${shortName(target.uri)}`;
