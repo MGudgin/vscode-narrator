@@ -27,9 +27,12 @@ You can also edit settings directly:
 
 - **Open Narration** — the book icon in the editor title bar (or **Code Narration: Open Narration**) narrates the active file.
 - **Open Diff Narration** — the git-compare icon (or **Code Narration: Open Diff Narration**) narrates only what changed in the active file vs `codeNarration.diffBase` (default `HEAD`).
-- **Click a section heading** in the narration pane to jump the editor to that range.
+- **Open Tree Diff Narration** — **Code Narration: Open Tree Diff Narration** narrates every changed file in the current repo vs `codeNarration.diffBase`, as one section per file plus an overview. With multiple repos in the workspace and no active editor, you'll be prompted to pick.
+- **Click a section heading** in the narration pane to jump the editor to that range. In tree-diff mode, sections for deleted files render as headings without a link.
 - **Cursor sync**: moving the cursor in the editor highlights the matching section in the narration pane.
 - **On save**: if the narrated file is saved, the narration re-runs (debounced). Toggle with `codeNarration.narrateOnSave`.
+- **Follow active editor**: enable `codeNarration.followActiveEditor` to retarget file-mode narration as focus moves between files. Diff and tree-diff stay pinned regardless.
+- **Speech**: enable `codeNarration.speech.enabled` to show TTS controls in the banner (play / pause / stop, voice picker, rate slider). With `codeNarration.speech.autoPlay` on, sentences are spoken as they stream in.
 
 ### What you'll see
 
@@ -44,11 +47,19 @@ You can also edit settings directly:
 | `codeNarration.provider` | `vscodeLm` | `vscodeLm` or `anthropic` |
 | `codeNarration.vscodeLm.modelFamily` | `""` | Optional family for VS Code LM picks |
 | `codeNarration.anthropic.model` | `claude-sonnet-4-6` | Any Anthropic model id |
+| `codeNarration.anthropic.maxOutputTokens` | `16384` | Max tokens an Anthropic narration may emit per request. Raise if long symbols / diffs are getting cut off (a truncation marker appears in the section); lower to cap spend. Should not exceed the model's documented max (Sonnet 4.6: 64k, Opus 4.7: 32k, Haiku 4.5: 8k). |
 | `codeNarration.diffBase` | `HEAD` | Git ref for diff mode |
 | `codeNarration.narrateOnSave` | `true` | Re-narrate after save |
+| `codeNarration.followActiveEditor` | `false` | In file mode, retarget the pane as the active editor changes. Diff / tree-diff targets stay pinned. |
 | `codeNarration.symbolConcurrency` | `4` | Max parallel LLM calls during symbol-aware fan-out (1–16) |
 | `codeNarration.recurseSymbols` | `"auto"` | Narrate child symbols as their own sections. `"auto"` recurses for container-heavy languages and stays top-level for others; `"always"` forces recursion; `"never"` forces top-level only |
 | `codeNarration.maxPromptTokens` | `50000` | Token budget per prompt body; oversized symbols are sub-chunked and merged |
+| `codeNarration.streamIdleTimeoutMs` | `60000` | Max ms the LLM stream may go without emitting a chunk before the request is aborted and (where applicable) retried. Guards against hung proxies and stalled SSE connections. `0` disables. |
+| `codeNarration.speech.enabled` | `false` | Show TTS controls in the narration pane and enable the system speech voices (Web Speech API). |
+| `codeNarration.speech.autoPlay` | `false` | Speak sentences automatically as they stream in. Requires `speech.enabled`. |
+| `codeNarration.speech.voice` | `""` | Preferred voice name. Empty uses the system default. Set via **Code Narration: Pick Voice**. |
+| `codeNarration.speech.rate` | `1.0` | Speech rate multiplier (0.5 = half speed, 2.0 = double speed). |
+| `codeNarration.speech.pitch` | `1.0` | Speech pitch multiplier (0 = lowest, 2 = highest). |
 
 `"auto"` (the default) recurses for languages whose top level is mostly namespaces and classes — C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++ — so methods, properties, and events each get their own section, and stays top-level only for everything else. Set the value globally or under a `[language]` scope to override. Legacy boolean values (`true`/`false`) are still honored as `"always"`/`"never"`.
 
@@ -58,17 +69,23 @@ You can also edit settings directly:
 | --- | --- |
 | Code Narration: Open Narration | Narrate the active file |
 | Code Narration: Open Diff Narration | Narrate the active file's diff vs base ref |
+| Code Narration: Open Tree Diff Narration | Narrate every changed file in the repo vs base ref |
 | Code Narration: Refresh Narration | Re-run, bypassing the cache |
 | Code Narration: Pick Model | Quick-pick a model |
 | Code Narration: Set Anthropic API Key | Store / clear the Anthropic key |
 | Code Narration: Clear Cache | Wipe cached narrations for this workspace |
+| Code Narration: Speak Narration | Start TTS playback of the current narration |
+| Code Narration: Stop Speech | Stop TTS playback |
+| Code Narration: Pick Voice | Quick-pick the TTS voice (sets `codeNarration.speech.voice`) |
 
 ## Notes
 
 - The cache is keyed by `(target, content, provider, model, prompt-version)` and lives in workspaceState; switching models or editing prompt files invalidates entries naturally.
-- All `command:` URIs in the narration are restricted to a `codeNarration.reveal` handler that jumps the editor; nothing else can be invoked from generated content.
-- Transient stream errors (network blips, rate limits) are retried per section with exponential backoff before failing.
-- Massive single symbols (thousands of lines, no nested structure) that would blow past the model's context window are split into overlapping line-range sub-chunks under `codeNarration.maxPromptTokens` (default 50 000), narrated independently, then merged into the section with line-range subheadings.
+- All `command:` URIs in the narration are restricted to `codeNarration.reveal` (jumps the editor) and `codeNarration.refresh` (re-runs the narration); nothing else can be invoked from generated content.
+- Transient stream errors (network blips, rate limits) are retried per section with exponential backoff before failing. A stream that goes idle for longer than `codeNarration.streamIdleTimeoutMs` (default 60 s) is aborted and retried.
+- Massive single symbols (thousands of lines, no nested structure) that would blow past the model's context window are split into overlapping line-range sub-chunks under `codeNarration.maxPromptTokens` (default 50 000), narrated independently, then merged into the section with line-range subheadings. The same sub-chunking applies to whole-file diff narration and to the no-symbols fallback.
+- If an Anthropic response hits `codeNarration.anthropic.maxOutputTokens`, a `_(response truncated — model hit max_tokens)_` marker is appended to the section so silent truncation is always visible.
+- In tree-diff mode, inline references inside a *deleted* file's section render as plain text rather than as `command:` reveal links — there's no useful destination for "line 5 of the deleted file."
 
 ## Building from source
 
