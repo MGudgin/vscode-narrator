@@ -47,6 +47,35 @@ describe('fixupLinks', () => {
         const md = 'plain text with no links at all';
         expect(fixupLinks(md, docUri)).toBe(md);
     });
+
+    test('clamps a 30-digit line number to a safely-integer-sized ceiling', () => {
+        const huge = '9'.repeat(30);
+        const md = `[bogus](narrate://lines/L${huge})`;
+        const result = fixupLinks(md, docUri);
+        const match = result.match(/command:codeNarration\.reveal\?([^)]+)\)$/);
+        expect(match).not.toBeNull();
+        const args = JSON.parse(decodeURIComponent(match![1]));
+        const startLine = args[1].start.line;
+        const endLine = args[1].end.line;
+        expect(Number.isFinite(startLine)).toBe(true);
+        expect(Number.isSafeInteger(startLine)).toBe(true);
+        expect(startLine).toBeLessThanOrEqual(1_000_000);
+        expect(Number.isFinite(endLine)).toBe(true);
+        expect(Number.isSafeInteger(endLine)).toBe(true);
+        expect(endLine).toBeLessThanOrEqual(1_000_000);
+    });
+
+    test('clamps both ends of a huge range link', () => {
+        const huge = '9'.repeat(30);
+        const md = `[r](narrate://lines/L${huge}-L${huge})`;
+        const result = fixupLinks(md, docUri);
+        const match = result.match(/command:codeNarration\.reveal\?([^)]+)\)$/);
+        const args = JSON.parse(decodeURIComponent(match![1]));
+        expect(args[1].start.line).toBeLessThanOrEqual(1_000_000);
+        expect(args[1].end.line).toBeLessThanOrEqual(1_000_000);
+        expect(Number.isSafeInteger(args[1].start.line)).toBe(true);
+        expect(Number.isSafeInteger(args[1].end.line)).toBe(true);
+    });
 });
 
 describe('buildUserPrompt', () => {

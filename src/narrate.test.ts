@@ -345,6 +345,49 @@ describe('narrateDocument', () => {
         expect(init.fromCache).toBeFalsy();
     });
 
+    test('sub-chunks the no-symbols fallback when the whole-file prompt exceeds maxPromptTokens', async () => {
+        // ~3 MB whole-file prompt and no symbols configured.
+        const totalLines = 1000;
+        const lineText = 'z'.repeat(3000);
+        const docText = Array.from({ length: totalLines }, () => lineText).join('\n');
+        const doc = mockDoc(docText);
+        const { options } = makeOptions({
+            fetchUnits: async () => [],
+            maxPromptTokens: 5_000,
+        });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['body.'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+
+        // Multiple provider calls — fallback path is now chunked.
+        expect(calls.length).toBeGreaterThan(1);
+        for (const c of calls) {
+            expect(c.userPrompt).toContain('sub-chunk of an oversized file');
+        }
+        const chunkEvents = events.filter((e) => e.kind === 'chunk') as Extract<NarrationEvent, { kind: 'chunk' }>[];
+        const merged = chunkEvents.map((c) => c.text).join('');
+        expect(merged).toMatch(/### Lines \[L\d+-L\d+\]/);
+        expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
+    });
+
+    test('does NOT sub-chunk the no-symbols fallback when the file fits', async () => {
+        const { options } = makeOptions({
+            fetchUnits: async () => [],
+            maxPromptTokens: 50_000,
+        });
+        const doc = mockDoc('a = 1\nb = 2\n');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['ok.'], calls);
+        const { sink } = collectSink();
+
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+
+        expect(calls).toHaveLength(1);
+        expect(calls[0].userPrompt).not.toContain('sub-chunk');
+    });
+
     test('per-section cache: all hits sets fromCache and skips the provider entirely', async () => {
         const units: NarrationUnit[] = [
             { kind: 'symbol', name: 'foo', range: new vscode.Range(0, 0, 0, 8) },
@@ -474,6 +517,55 @@ describe('narrateDiff', () => {
 
         // Pre-cancelled token should short-circuit before emitting any events.
         expect(events).toHaveLength(0);
+    });
+
+    test('sub-chunks the modified case when the diff prompt exceeds maxPromptTokens', async () => {
+        // Build a ~3 MB post-change source so the combined prompt body is far
+        // over a 5_000-token budget.
+        const totalLines = 1000;
+        const lineText = 'y'.repeat(3000);
+        const docText = Array.from({ length: totalLines }, () => lineText).join('\n');
+        const doc = mockDoc(docText);
+
+        const diff: DiffResult = { kind: 'modified', unifiedDiff: '@@ -1 +1 @@\n-old\n+new' };
+        const { options } = makeOptions({
+            fetchDiff: async () => diff,
+            maxPromptTokens: 5_000,
+        });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['body.'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateDiff(doc, 'origin/main', provider, liveToken(), sink, options);
+
+        // Multiple provider calls — diff path is now chunked.
+        expect(calls.length).toBeGreaterThan(1);
+        for (const c of calls) {
+            expect(c.userPrompt).toContain('sub-chunk of an oversized change');
+        }
+        // Subheadings mark each chunk inside the merged section body.
+        const chunkEvents = events.filter((e) => e.kind === 'chunk') as Extract<NarrationEvent, { kind: 'chunk' }>[];
+        const merged = chunkEvents.map((c) => c.text).join('');
+        expect(merged).toMatch(/### Lines \[L\d+-L\d+\]/);
+        expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
+    });
+
+    test('does NOT sub-chunk the modified case when the diff prompt fits', async () => {
+        const diff: DiffResult = { kind: 'modified', unifiedDiff: '@@ -1 +1 @@\n-old\n+new' };
+        const { options } = makeOptions({
+            fetchDiff: async () => diff,
+            maxPromptTokens: 50_000,
+        });
+        const doc = mockDoc('short\nfile\n');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['ok.'], calls);
+        const { sink } = collectSink();
+
+        await narrateDiff(doc, 'origin/main', provider, liveToken(), sink, options);
+
+        // Exactly one provider call when the prompt fits.
+        expect(calls).toHaveLength(1);
+        expect(calls[0].userPrompt).not.toContain('sub-chunk');
     });
 });
 

@@ -10,9 +10,11 @@ import {
     TREE_SUMMARY_SYSTEM_PROMPT,
     TREE_FILE_DIFF_SYSTEM_PROMPT,
     buildUserPrompt,
+    buildUserPromptForRange,
     buildSymbolUserPrompt,
     buildSymbolUserPromptForRange,
     buildDiffUserPrompt,
+    buildDiffUserPromptForRange,
     buildTreeSummaryPrompt,
     buildTreeFileDiffPrompt,
     fixupLinks,
@@ -130,24 +132,17 @@ export async function narrateDiff(
                 }
             }
             sink({ kind: 'init', sections: [{ id: 'main' }] });
-            let acc = '';
-            await withTransientRetry(
-                async (attempt) => {
-                    if (attempt > 0) {
-                        acc = '';
-                        sink({ kind: 'sectionReset', sectionId: 'main' });
-                    }
-                    for await (const chunk of provider.stream(
-                        DIFF_SYSTEM_PROMPT,
-                        buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff),
-                        token,
-                    )) {
-                        if (token.isCancellationRequested) return;
-                        acc += chunk;
-                        sink({ kind: 'chunk', sectionId: 'main', text: chunk });
-                    }
-                },
-                { isCancelled: () => token.isCancellationRequested },
+            const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
+            const acc = await streamWholeFileOrChunked(
+                doc,
+                provider,
+                token,
+                sink,
+                DIFF_SYSTEM_PROMPT,
+                buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff),
+                (startLine, endLine) =>
+                    buildDiffUserPromptForRange(doc, baseRef, diffResult.unifiedDiff, startLine, endLine),
+                maxPromptTokens,
             );
             if (token.isCancellationRequested) return;
             sink({ kind: 'sectionDone', sectionId: 'main' });
@@ -349,20 +344,16 @@ async function narrateFileBody(
             }
         }
         sink({ kind: 'init', sections: [...prefixSections, { id: 'main' }] });
-        let acc = '';
-        await withTransientRetry(
-            async (attempt) => {
-                if (attempt > 0) {
-                    acc = '';
-                    sink({ kind: 'sectionReset', sectionId: 'main' });
-                }
-                for await (const chunk of provider.stream(SYSTEM_PROMPT, buildUserPrompt(doc), token)) {
-                    if (token.isCancellationRequested) return;
-                    acc += chunk;
-                    sink({ kind: 'chunk', sectionId: 'main', text: chunk });
-                }
-            },
-            { isCancelled: () => token.isCancellationRequested },
+        const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
+        const acc = await streamWholeFileOrChunked(
+            doc,
+            provider,
+            token,
+            sink,
+            SYSTEM_PROMPT,
+            buildUserPrompt(doc),
+            (startLine, endLine) => buildUserPromptForRange(doc, startLine, endLine),
+            maxPromptTokens,
         );
         if (token.isCancellationRequested) return;
         sink({ kind: 'sectionDone', sectionId: 'main' });
@@ -550,6 +541,94 @@ async function streamChunkIntoSection(
         },
         { isCancelled: () => token.isCancellationRequested },
     );
+}
+
+/**
+ * Stream a whole-file or diff narration into the "main" section, sub-chunking
+ * when the prompt exceeds the configured token budget. Mirrors the symbol
+ * sub-chunking strategy: split the document line range into overlapping
+ * chunks, emit a `### Lines L<start>-L<end>` subheading before each chunk's
+ * narration, and concatenate the outputs.
+ */
+async function streamWholeFileOrChunked(
+    doc: vscode.TextDocument,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+    sink: NarrationSink,
+    systemPrompt: string,
+    fullPrompt: string,
+    buildRangePrompt: (startLine: number, endLine: number) => string,
+    maxPromptTokens: number,
+): Promise<string> {
+    let acc = '';
+    if (!shouldSubChunk(fullPrompt, maxPromptTokens)) {
+        await withTransientRetry(
+            async (attempt) => {
+                if (attempt > 0) {
+                    acc = '';
+                    sink({ kind: 'sectionReset', sectionId: 'main' });
+                }
+                for await (const chunk of provider.stream(systemPrompt, fullPrompt, token)) {
+                    if (token.isCancellationRequested) return;
+                    acc += chunk;
+                    sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+                }
+            },
+            { isCancelled: () => token.isCancellationRequested },
+        );
+        return acc;
+    }
+
+    const startLine = 0;
+    const endLine = Math.max(0, doc.lineCount - 1);
+    const ranges = splitLineRange(startLine, endLine, fullPrompt.length, { maxPromptTokens });
+
+    if (ranges.length <= 1) {
+        await withTransientRetry(
+            async (attempt) => {
+                if (attempt > 0) {
+                    acc = '';
+                    sink({ kind: 'sectionReset', sectionId: 'main' });
+                }
+                for await (const chunk of provider.stream(systemPrompt, fullPrompt, token)) {
+                    if (token.isCancellationRequested) return;
+                    acc += chunk;
+                    sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+                }
+            },
+            { isCancelled: () => token.isCancellationRequested },
+        );
+        return acc;
+    }
+
+    for (let i = 0; i < ranges.length; i++) {
+        if (token.isCancellationRequested) return acc;
+        const range = ranges[i];
+        const label = formatLineRangeLabel(range);
+        const subheading = `${i > 0 ? '\n\n' : ''}### Lines [${label}](narrate://lines/${label}) (chunk ${i + 1}/${ranges.length})\n\n`;
+        acc += subheading;
+        sink({ kind: 'chunk', sectionId: 'main', text: subheading });
+
+        const userPrompt = buildRangePrompt(range.startLine, range.endLine);
+        const chunkStartOffset = acc.length;
+
+        await withTransientRetry(
+            async (attempt) => {
+                if (attempt > 0) {
+                    acc = acc.slice(0, chunkStartOffset);
+                    sink({ kind: 'sectionReset', sectionId: 'main' });
+                    sink({ kind: 'chunk', sectionId: 'main', text: acc });
+                }
+                for await (const chunk of provider.stream(systemPrompt, userPrompt, token)) {
+                    if (token.isCancellationRequested) return;
+                    acc += chunk;
+                    sink({ kind: 'chunk', sectionId: 'main', text: chunk });
+                }
+            },
+            { isCancelled: () => token.isCancellationRequested },
+        );
+    }
+    return acc;
 }
 
 async function streamIntoSection(
