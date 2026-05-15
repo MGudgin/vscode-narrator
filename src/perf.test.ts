@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // Performance / micro-benchmark tests. These assert *complexity shape* rather
 // than wall-clock targets, so they remain stable across machines: each test
 // runs the suspected hot path at two problem sizes (N and 4N) and fails when
@@ -10,7 +9,9 @@ import * as vscode from 'vscode';
 import { NarrationCache } from './cache';
 import { flattenSymbols } from './symbols';
 import { SentenceBuffer } from './speech';
-import { fixupLinks, buildUserPromptForRange } from './prompt';
+import { buildUserPromptForRange } from './prompt';
+import { buildNarrationSink } from './sink';
+import { NarrationTarget } from './target';
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -43,13 +44,11 @@ function measure(label: string, fn: () => void | Promise<void>): Promise<number>
         return r.then(() => {
             const elapsed = performance.now() - start;
             // Surface timings so the CI log shows them.
-            // eslint-disable-next-line no-console
             console.log(`[perf] ${label}: ${elapsed.toFixed(2)} ms`);
             return elapsed;
         });
     }
     const elapsed = performance.now() - start;
-    // eslint-disable-next-line no-console
     console.log(`[perf] ${label}: ${elapsed.toFixed(2)} ms`);
     return Promise.resolve(elapsed);
 }
@@ -78,8 +77,8 @@ async function measureBest(label: string, fn: () => void | Promise<void>, sample
 // For a file with 20 sections, narrateFileBody fires 20 parallel cache.get()
 // calls — each one rewriting the whole array.
 // ───────────────────────────────────────────────────────────────────────────
-describe('[perf] NarrationCache.get rewrites cache on every hit', () => {
-    test('every get() on a hit issues a write of the entire array', async () => {
+describe('[perf] NarrationCache.get LRU touch no longer rewrites the cache', () => {
+    test('parallel section gets issue zero writes (was: one per hit)', async () => {
         const memento = new MemoryMemento();
         const cache = new NarrationCache(memento);
 
@@ -90,7 +89,6 @@ describe('[perf] NarrationCache.get rewrites cache on every hit', () => {
             await cache.set(`k${i}`, body);
         }
         const writesAfterFill = memento.writeCount;
-        const baselineBytes = memento.lastWriteBytes;
 
         // Simulate the parallel-section-cache-check pattern from narrateFileBody.
         const SECTIONS = 20;
@@ -99,32 +97,46 @@ describe('[perf] NarrationCache.get rewrites cache on every hit', () => {
         );
 
         const extraWrites = memento.writeCount - writesAfterFill;
-        // Each get() against a hit issues a full-array write. So extraWrites
-        // should equal SECTIONS — that's the bug. A well-behaved cache should
-        // do 0 (no touch) or 1 (batched).
-        expect(extraWrites).toBe(SECTIONS);
-        // The payload written each time is ~the size of the entire cache.
-        expect(memento.lastWriteBytes).toBeGreaterThan(baselineBytes * 0.9);
-        // eslint-disable-next-line no-console
-        console.log(`[perf] cache.get hits: ${SECTIONS} reads -> ${extraWrites} full-array writes (${memento.lastWriteBytes} bytes each)`);
+        // After #74, LRU touches stay in memory until the next write.
+        expect(extraWrites).toBe(0);
+        console.log(`[perf] cache.get hits: ${SECTIONS} reads -> ${extraWrites} writes`);
     });
 
-    test('hit-rate scaling: doubling cache size doubles bytes written per get', async () => {
+    test('getMany batched read returns all hits with at most one write', async () => {
+        const memento = new MemoryMemento();
+        const cache = new NarrationCache(memento);
+
+        const ENTRIES = 100;
+        const body = 'lorem ipsum '.repeat(170);
+        for (let i = 0; i < ENTRIES; i++) await cache.set(`k${i}`, body);
+        const writesAfterFill = memento.writeCount;
+
+        const SECTIONS = 20;
+        const keys = Array.from({ length: SECTIONS }, (_, i) => `k${i}`);
+        const hits = await cache.getMany(keys);
+
+        // Every requested key is a hit.
+        expect(hits.size).toBe(SECTIONS);
+        for (const k of keys) expect(hits.get(k)).toBe(body);
+        // No persistence write happens for read-side LRU touches.
+        expect(memento.writeCount - writesAfterFill).toBe(0);
+    });
+
+    test('per-get bytes written is zero regardless of cache size', async () => {
         async function bytesPerGet(entryCount: number): Promise<number> {
             const memento = new MemoryMemento();
             const cache = new NarrationCache(memento);
             const body = 'x'.repeat(2048);
             for (let i = 0; i < entryCount; i++) await cache.set(`k${i}`, body);
-            memento.lastWriteBytes = 0;
+            const before = memento.writeCount;
             await cache.get('k0');
-            return memento.lastWriteBytes;
+            return memento.writeCount - before;
         }
         const small = await bytesPerGet(50);
         const large = await bytesPerGet(200);
-        // Roughly linear in entry count — confirms the whole array is rewritten.
-        expect(large).toBeGreaterThan(small * 3);
-        // eslint-disable-next-line no-console
-        console.log(`[perf] write-amplification: 50-entry cache writes ${small}B per get; 200-entry writes ${large}B per get`);
+        // Post-fix: read-time writes are eliminated entirely.
+        expect(small).toBe(0);
+        expect(large).toBe(0);
     });
 });
 
@@ -170,7 +182,6 @@ describe('[perf] flattenSymbols scaling on deep symbol trees', () => {
             flattenSymbols(makeDeepTree(FOURX));
         });
         const ratio = t4n / Math.max(tn, 0.001);
-        // eslint-disable-next-line no-console
         console.log(`[perf] flattenSymbols 4x ratio = ${ratio.toFixed(2)} (linear=4, quadratic=16)`);
         expect(ratio).toBeLessThan(5);
     });
@@ -181,7 +192,7 @@ describe('[perf] flattenSymbols scaling on deep symbol trees', () => {
 // buffer on every chunk. For a long section streamed in many small chunks
 // the total work is O(N²) in section length.
 // ───────────────────────────────────────────────────────────────────────────
-describe('[perf] SentenceBuffer.push re-scans full pending buffer', () => {
+describe('[perf] SentenceBuffer.push is sub-quadratic in section length', () => {
     function streamPushAll(chunks: string[]): number {
         const buf = new SentenceBuffer();
         const start = performance.now();
@@ -190,23 +201,31 @@ describe('[perf] SentenceBuffer.push re-scans full pending buffer', () => {
         return performance.now() - start;
     }
 
-    test('many tiny chunks of a long un-terminated paragraph are super-linear', () => {
-        // A long block with NO sentence terminator: every push() will re-scan
-        // all pending text. This is the worst case for the current
-        // implementation.
+    test('many tiny chunks of a long un-terminated paragraph stay near-linear', () => {
+        // A long block with NO sentence terminator: under the old code every
+        // push() re-scanned all pending text (O(N^2)). Post-fix the buffer
+        // short-circuits when neither the chunk nor pending carries a
+        // terminator, so total work is linear.
         function makeChunks(totalChars: number, chunkSize: number): string[] {
             const out: string[] = [];
             const chunk = 'x'.repeat(chunkSize);
             for (let i = 0; i < Math.floor(totalChars / chunkSize); i++) out.push(chunk);
             return out;
         }
-        const tN = streamPushAll(makeChunks(20_000, 5));
-        const t4N = streamPushAll(makeChunks(80_000, 5));
+        // Bigger sizes (and a few warm-up rounds) so timing variance at the
+        // sub-millisecond scale doesn't dominate the ratio.
+        const small = makeChunks(80_000, 5);
+        const big = makeChunks(320_000, 5);
+        for (let i = 0; i < 3; i++) {
+            streamPushAll(small);
+            streamPushAll(big);
+        }
+        const tN = streamPushAll(small);
+        const t4N = streamPushAll(big);
         const ratio = t4N / Math.max(tN, 0.001);
-        // eslint-disable-next-line no-console
-        console.log(`[perf] SentenceBuffer push 20k vs 80k chars (5-char chunks): ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        // We just record the shape — no hard assertion because timings vary.
-        expect(tN).toBeGreaterThan(0);
+        console.log(`[perf] SentenceBuffer push 80k vs 320k chars (5-char chunks): ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
+        // Pre-fix the ratio was ~14; post-fix it should be near-linear.
+        expect(ratio).toBeLessThan(6);
     });
 });
 
@@ -217,28 +236,60 @@ describe('[perf] SentenceBuffer.push re-scans full pending buffer', () => {
 // during streaming chunks land roughly every 100ms. Over a long section the
 // regex pass over already-fixed-up text repeats unboundedly.
 // ───────────────────────────────────────────────────────────────────────────
-describe('[perf] fixupLinks scans whole accumulated body each call', () => {
-    test('per-chunk fixupLinks over growing accumulated markdown is super-linear', () => {
-        const uri = vscode.Uri.parse('file:///foo.ts') as unknown as vscode.Uri;
+describe('[perf] sink chunk render is sub-quadratic in section length', () => {
+    function fileTarget(): NarrationTarget {
+        return { kind: 'file', uri: vscode.Uri.parse('file:///foo.ts') as unknown as vscode.Uri };
+    }
+    function liveToken(): vscode.CancellationToken {
+        return {
+            isCancellationRequested: false,
+            onCancellationRequested: () => ({ dispose: () => {} }),
+        } as unknown as vscode.CancellationToken;
+    }
+    function silentWebview(): { postMessage: () => Thenable<boolean> } {
+        return { postMessage: () => Promise.resolve(true) };
+    }
 
-        function simulate(chunks: number): number {
-            const chunk = '[foo](narrate://lines/L1-L10) some text here. ';
-            let acc = '';
+    function simulate(chunks: number): number {
+        // The render path in sink.ts is gated by a 100ms throttle. To
+        // exercise the per-chunk cost deterministically, monkey-patch
+        // Date.now so every chunk crosses the throttle boundary.
+        const realNow = Date.now;
+        let virtualNow = 1_000_000;
+        Date.now = () => (virtualNow += 1000);
+        try {
+            const sink = buildNarrationSink({
+                webview: silentWebview() as any,
+                token: liveToken(),
+                target: fileTarget(),
+                bannerLabel: 'L',
+                sectionRanges: [],
+            });
+            sink({ kind: 'init', sections: [{ id: 'a' }] });
+            // Use a chunk ending in `\n\n` so the incremental path settles each
+            // chunk into the prefix — this is the common shape of streamed
+            // paragraph-style narration.
+            const chunk = '[foo](narrate://lines/L1-L10) some text here.\n\n';
             const start = performance.now();
             for (let i = 0; i < chunks; i++) {
-                acc += chunk;
-                // Mimic sink.ts throttled render path: fixupLinks(state.accumulated).
-                fixupLinks(acc, uri);
+                sink({ kind: 'chunk', sectionId: 'a', text: chunk });
             }
+            sink({ kind: 'sectionDone', sectionId: 'a' });
             return performance.now() - start;
+        } finally {
+            Date.now = realNow;
         }
+    }
 
+    test('per-chunk render cost stays near-linear as the body grows', () => {
+        // Warm-up.
+        simulate(200);
         const tN = simulate(500);
         const t4N = simulate(2000);
         const ratio = t4N / Math.max(tN, 0.001);
-        // eslint-disable-next-line no-console
-        console.log(`[perf] fixupLinks per-chunk over growing buffer: ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        expect(tN).toBeGreaterThan(0);
+        console.log(`[perf] sink chunk render 500 vs 2000 chunks: ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
+        // Pre-fix the ratio was ~19; the incremental render brings it under 6.
+        expect(ratio).toBeLessThan(6);
     });
 });
 

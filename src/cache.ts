@@ -23,19 +23,32 @@ function isCacheEntry(value: unknown): value is CacheEntry {
 }
 
 export class NarrationCache {
+    private entries: Map<string, CacheEntry> | undefined;
+
     constructor(private readonly state: vscode.Memento) {}
 
     async get(key: string): Promise<string | undefined> {
-        const entries = this.read();
-        const found = entries.find((e) => e.key === key);
-        if (!found) return undefined;
-        found.timestamp = Date.now();
-        try {
-            await this.state.update(STATE_KEY, entries);
-        } catch {
-            // best-effort LRU touch
-        }
+        const entries = this.ensureLoaded();
+        const found = entries.get(key);
+        if (found === undefined) return undefined;
+        // LRU touch is purely in-memory; persistence happens on the next write.
+        // The recency order survives within the process; on reload from
+        // workspaceState the persisted `timestamp` field re-establishes it.
+        this.bumpToEnd(entries, key, found);
         return found.markdown;
+    }
+
+    async getMany(keys: string[]): Promise<Map<string, string>> {
+        const out = new Map<string, string>();
+        if (keys.length === 0) return out;
+        const entries = this.ensureLoaded();
+        for (const key of keys) {
+            const found = entries.get(key);
+            if (found === undefined) continue;
+            out.set(key, found.markdown);
+            this.bumpToEnd(entries, key, found);
+        }
+        return out;
     }
 
     async set(key: string, markdown: string): Promise<void> {
@@ -45,26 +58,55 @@ export class NarrationCache {
     async setMany(updates: { key: string; markdown: string }[]): Promise<void> {
         if (updates.length === 0) return;
         try {
-            const incomingKeys = new Set(updates.map((u) => u.key));
+            const entries = this.ensureLoaded();
             const now = Date.now();
-            let entries = this.read().filter((e) => !incomingKeys.has(e.key));
-            for (const u of updates) entries.push({ key: u.key, markdown: u.markdown, timestamp: now });
-            entries.sort((a, b) => b.timestamp - a.timestamp);
-            if (entries.length > MAX_ENTRIES) entries = entries.slice(0, MAX_ENTRIES);
-            await this.state.update(STATE_KEY, entries);
+            for (const u of updates) {
+                entries.delete(u.key);
+                entries.set(u.key, { key: u.key, markdown: u.markdown, timestamp: now });
+            }
+            while (entries.size > MAX_ENTRIES) {
+                const oldestKey = entries.keys().next().value;
+                if (oldestKey === undefined) break;
+                entries.delete(oldestKey);
+            }
+            await this.state.update(STATE_KEY, Array.from(entries.values()));
         } catch (err) {
             console.error('codeNarration: cache write failed', err);
         }
     }
 
     async clearAll(): Promise<void> {
+        this.entries = new Map();
         await this.state.update(STATE_KEY, []);
     }
 
-    private read(): CacheEntry[] {
+    private bumpToEnd(entries: Map<string, CacheEntry>, key: string, entry: CacheEntry): void {
+        entries.delete(key);
+        entry.timestamp = Date.now();
+        entries.set(key, entry);
+    }
+
+    private ensureLoaded(): Map<string, CacheEntry> {
+        if (this.entries !== undefined) return this.entries;
+        this.entries = this.readFromState();
+        return this.entries;
+    }
+
+    private readFromState(): Map<string, CacheEntry> {
         const raw = this.state.get<unknown>(STATE_KEY, []);
-        if (!Array.isArray(raw)) return [];
-        return raw.filter(isCacheEntry);
+        const result = new Map<string, CacheEntry>();
+        if (!Array.isArray(raw)) return result;
+        const valid: CacheEntry[] = [];
+        for (const item of raw) {
+            if (isCacheEntry(item)) valid.push(item);
+        }
+        // Oldest-first so iteration order matches LRU; eviction drops the head.
+        valid.sort((a, b) => a.timestamp - b.timestamp);
+        for (const entry of valid) {
+            result.delete(entry.key);
+            result.set(entry.key, entry);
+        }
+        return result;
     }
 }
 

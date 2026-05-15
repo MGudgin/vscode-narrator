@@ -327,3 +327,97 @@ describe('buildNarrationSink', () => {
         expect(webview.messages[0].kind).toBe('reset');
     });
 });
+
+describe('buildNarrationSink — incremental render (#76)', () => {
+    function withVirtualClock(start: number, step: number, fn: () => void): void {
+        const realNow = Date.now;
+        let now = start;
+        Date.now = () => (now += step);
+        try {
+            fn();
+        } finally {
+            Date.now = realNow;
+        }
+    }
+
+    test('a link split across two chunks renders as a working anchor', () => {
+        const webview = makeWebview();
+        const sink = buildNarrationSink({
+            webview,
+            token: liveToken(),
+            target: fileTarget(),
+            bannerLabel: 'L',
+            sectionRanges: [],
+        });
+        sink({ kind: 'init', sections: [{ id: 'a' }] });
+        webview.messages.length = 0;
+
+        // Use a virtual clock that crosses the 100ms throttle every chunk.
+        withVirtualClock(1_000_000, 200, () => {
+            // Half a link arrives first — the closing `](url)` is in the
+            // next chunk. The incremental cutter must not freeze the broken
+            // half into the settled prefix.
+            sink({ kind: 'chunk', sectionId: 'a', text: 'See [the docs' });
+            sink({ kind: 'chunk', sectionId: 'a', text: '](narrate://lines/L1) for details.' });
+            sink({ kind: 'sectionDone', sectionId: 'a' });
+        });
+
+        // The final replace must contain a complete anchor with the rewritten
+        // command: href produced by fixupLinks, not literal `[the docs](...)`.
+        const replaces = webview.messages.filter((m) => m.kind === 'replace');
+        const last = replaces[replaces.length - 1];
+        expect(last).toBeDefined();
+        expect((last.bodyHtml as string)).toMatch(/<a[^>]*href="command:codeNarration\.reveal/i);
+        expect((last.bodyHtml as string)).toMatch(/the docs<\/a>/);
+    });
+
+    test('paragraph-terminated chunks settle into the prefix; cross-chunk constructs survive', () => {
+        const webview = makeWebview();
+        const sink = buildNarrationSink({
+            webview,
+            token: liveToken(),
+            target: fileTarget(),
+            bannerLabel: 'L',
+            sectionRanges: [],
+        });
+        sink({ kind: 'init', sections: [{ id: 'a' }] });
+        webview.messages.length = 0;
+
+        withVirtualClock(2_000_000, 200, () => {
+            // Three paragraphs, each terminated by `\n\n`, then a half-open
+            // link that completes in the next chunk.
+            sink({ kind: 'chunk', sectionId: 'a', text: 'First paragraph.\n\n' });
+            sink({ kind: 'chunk', sectionId: 'a', text: 'Second paragraph.\n\n' });
+            sink({ kind: 'chunk', sectionId: 'a', text: 'Read [the' });
+            sink({ kind: 'chunk', sectionId: 'a', text: ' docs](narrate://lines/L1).' });
+            sink({ kind: 'sectionDone', sectionId: 'a' });
+        });
+
+        const replaces = webview.messages.filter((m) => m.kind === 'replace');
+        const last = replaces[replaces.length - 1];
+        const html = last.bodyHtml as string;
+        // Settled paragraphs are still in the output.
+        expect(html).toMatch(/First paragraph\./);
+        expect(html).toMatch(/Second paragraph\./);
+        // The boundary-spanning link rendered as a single anchor.
+        expect(html).toMatch(/<a[^>]*href="command:codeNarration\.reveal[^"]*"[^>]*>the docs<\/a>/);
+    });
+
+    test('placeholder body still emits for an empty section on sectionDone', () => {
+        const webview = makeWebview();
+        const sink = buildNarrationSink({
+            webview,
+            token: liveToken(),
+            target: fileTarget(),
+            bannerLabel: 'L',
+            sectionRanges: [],
+        });
+
+        sink({ kind: 'init', sections: [{ id: 'a' }] });
+        webview.messages.length = 0;
+        sink({ kind: 'sectionDone', sectionId: 'a' });
+
+        const replace = webview.messages.find((m) => m.kind === 'replace');
+        expect((replace?.bodyHtml as string)).toMatch(/no narration produced/);
+    });
+});

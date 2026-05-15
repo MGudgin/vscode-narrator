@@ -412,9 +412,10 @@ async function narrateFileBody(
     });
 
     if (!options.skipCache) {
-        await Promise.all(sections.map(async (s) => {
-            s.cachedBody = await options.cache.get(s.cacheKey);
-        }));
+        const hits = await options.cache.getMany(sections.map((s) => s.cacheKey));
+        for (const s of sections) {
+            s.cachedBody = hits.get(s.cacheKey);
+        }
     }
     const allCached = sections.length > 0 && sections.every((s) => s.cachedBody !== undefined);
 
