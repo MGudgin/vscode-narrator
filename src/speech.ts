@@ -162,29 +162,34 @@ export class SentenceBuffer {
      * `pending` without re-scanning all of it on every push.
      */
     private pendingHasNoTerminator = true;
+    private _scannedBytes = 0;
+    private _appendedBytes = 0;
+
+    /** Total bytes scanned across all `pending`-wide passes (splitSentences + hasTerminator). */
+    get scannedBytes(): number { return this._scannedBytes; }
+    /** Total bytes appended via push() — i.e. the section length seen so far. */
+    get appendedBytes(): number { return this._appendedBytes; }
 
     /** Add a streamed markdown chunk. Returns any sentences that are now complete. */
     push(chunk: string): string[] {
         if (!chunk) return [];
+        this._appendedBytes += chunk.length;
         const chunkHasTerm = hasTerminator(chunk);
-        // Fast path: if neither the existing pending nor the new chunk holds
-        // any terminator, there cannot be a sentence boundary. Append and exit.
         if (!chunkHasTerm && this.pendingHasNoTerminator) {
             this.pending += chunk;
             return [];
         }
         this.pending += chunk;
-        // If the buffer ends right at a terminator (no whitespace after), hold
-        // the last sentence back — it could be part of a yet-incomplete
-        // abbreviation like `e.` extending to `e.g.` in the next chunk.
         const last = this.pending[this.pending.length - 1];
         const endsAtTerminator = last === '.' || last === '!' || last === '?';
+        this._scannedBytes += this.pending.length;
         const { sentences, remainder } = splitSentences(this.pending);
         if (endsAtTerminator && remainder === '' && sentences.length > 0) {
             this.pending = sentences.pop()!;
         } else {
             this.pending = remainder;
         }
+        this._scannedBytes += this.pending.length;
         this.pendingHasNoTerminator = !hasTerminator(this.pending);
         const speakable: string[] = [];
         for (const s of sentences) {

@@ -7,10 +7,18 @@
 import { describe, test, expect } from 'vitest';
 import * as vscode from 'vscode';
 import { NarrationCache } from './cache';
-import { flattenSymbols } from './symbols';
+import {
+    flattenSymbols,
+    getFlattenSymbolsInternalAllocations,
+    resetFlattenSymbolsInternalAllocations,
+} from './symbols';
 import { SentenceBuffer, markdownToSpeech } from './speech';
 import { buildUserPromptForRange } from './prompt';
-import { buildNarrationSink } from './sink';
+import {
+    buildNarrationSink,
+    getSinkRenderBytesProcessed,
+    resetSinkRenderBytesProcessed,
+} from './sink';
 import { NarrationTarget } from './target';
 import { findSectionForLine } from './extension';
 
@@ -52,23 +60,6 @@ function measure(label: string, fn: () => void | Promise<void>): Promise<number>
     const elapsed = performance.now() - start;
     console.log(`[perf] ${label}: ${elapsed.toFixed(2)} ms`);
     return Promise.resolve(elapsed);
-}
-
-// Best-of-N microbenchmark: take the minimum elapsed across `samples` runs to
-// filter CI neighbour noise and GC pauses. Single-sample timings of fast
-// (sub-10 ms) operations are too variance-prone to assert tight ratios against.
-async function measureBest(label: string, fn: () => void | Promise<void>, samples = 5): Promise<number> {
-    let best = Infinity;
-    for (let i = 0; i < samples; i++) {
-        const start = performance.now();
-        const r = fn();
-        if (r instanceof Promise) await r;
-        const elapsed = performance.now() - start;
-        if (elapsed < best) best = elapsed;
-    }
-    // eslint-disable-next-line no-console
-    console.log(`[perf] ${label}: best ${best.toFixed(2)} ms (of ${samples})`);
-    return best;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -142,13 +133,19 @@ describe('[perf] NarrationCache.get LRU touch no longer rewrites the cache', () 
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Issue: flattenSymbols uses `result.push(...flattenSymbols(...))` which
-// allocates a new array per recursive call AND spreads it — making the total
-// work O(N²) on a deep tree where every level adds one symbol.
+// Issue: flattenSymbols used `result.push(...flattenSymbols(...))` which
+// allocates a fresh result array per recursive call and then spreads it,
+// producing O(N²) work on deep trees. The fix threads a shared accumulator
+// through every recursive call so internal allocations stay at exactly 1
+// regardless of tree depth.
+//
+// Assertion: count internal `[]` allocations via an exported counter. After
+// the fix this is exactly 1 (the top-level default-supplied accumulator),
+// regardless of node count. A regression to the per-call-allocates pattern
+// would push the count to ~N.
 // ───────────────────────────────────────────────────────────────────────────
-describe('[perf] flattenSymbols scaling on deep symbol trees', () => {
+describe('[perf] flattenSymbols allocates exactly one accumulator regardless of depth', () => {
     function makeDeepTree(depth: number): vscode.DocumentSymbol[] {
-        // Linear chain: 1 root -> 1 child -> 1 child -> ... (depth deep)
         let node: any = {
             name: `n${depth - 1}`,
             detail: '',
@@ -170,74 +167,95 @@ describe('[perf] flattenSymbols scaling on deep symbol trees', () => {
         return [node];
     }
 
-    test('flat output size grows linearly and timing stays near-linear with depth', async () => {
-        const N = 1000;
-        const FOURX = N * 4;
-        // Warm-up so V8 inlining / GC settles before any timed run.
-        flattenSymbols(makeDeepTree(N));
-        flattenSymbols(makeDeepTree(FOURX));
-        const tn = await measureBest(`flattenSymbols depth=${N}`, () => {
-            flattenSymbols(makeDeepTree(N));
-        });
-        const t4n = await measureBest(`flattenSymbols depth=${FOURX}`, () => {
-            flattenSymbols(makeDeepTree(FOURX));
-        });
-        const ratio = t4n / Math.max(tn, 0.001);
-        console.log(`[perf] flattenSymbols 4x ratio = ${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        expect(ratio).toBeLessThan(5);
+    test('depth=1000 and depth=4000 each cause exactly 1 internal allocation', () => {
+        for (const depth of [1000, 4000]) {
+            resetFlattenSymbolsInternalAllocations();
+            const out = flattenSymbols(makeDeepTree(depth));
+            expect(out.length).toBe(depth);
+            expect(getFlattenSymbolsInternalAllocations()).toBe(1);
+        }
+    });
+
+    test('passing an explicit accumulator triggers zero internal allocations and reuses the array', () => {
+        const seed: vscode.DocumentSymbol[] = [];
+        resetFlattenSymbolsInternalAllocations();
+        const result = flattenSymbols(makeDeepTree(2000), '', seed);
+        expect(result).toBe(seed);
+        expect(getFlattenSymbolsInternalAllocations()).toBe(0);
+        expect(result.length).toBe(2000);
     });
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Issue: SentenceBuffer.push runs splitSentences over the entire pending
-// buffer on every chunk. For a long section streamed in many small chunks
-// the total work is O(N²) in section length.
+// Issue: SentenceBuffer.push ran splitSentences over the entire pending
+// buffer on every chunk, producing O(N²) total scanned bytes when chunks
+// have no terminator. The fix short-circuits that scan whenever neither
+// the new chunk nor pending carries a terminator.
+//
+// Assertion: total bytes scanned across all push() calls stays linear in
+// total appended bytes. Pre-fix the scan-bytes were O(N²/chunkSize); post
+// fix scan-bytes are 0 for a terminator-free stream and a small multiple
+// of N once terminators appear.
 // ───────────────────────────────────────────────────────────────────────────
-describe('[perf] SentenceBuffer.push is sub-quadratic in section length', () => {
-    function streamPushAll(chunks: string[]): number {
-        const buf = new SentenceBuffer();
-        const start = performance.now();
-        for (const c of chunks) buf.push(c);
-        buf.flush();
-        return performance.now() - start;
+describe('[perf] SentenceBuffer.push scan-bytes stay linear in section length', () => {
+    function makeChunks(totalChars: number, chunkSize: number, char: string): string[] {
+        const out: string[] = [];
+        const chunk = char.repeat(chunkSize);
+        for (let i = 0; i < Math.floor(totalChars / chunkSize); i++) out.push(chunk);
+        return out;
     }
 
-    test('many tiny chunks of a long un-terminated paragraph stay near-linear', () => {
-        // A long block with NO sentence terminator: under the old code every
-        // push() re-scanned all pending text (O(N^2)). Post-fix the buffer
-        // short-circuits when neither the chunk nor pending carries a
-        // terminator, so total work is linear.
-        function makeChunks(totalChars: number, chunkSize: number): string[] {
-            const out: string[] = [];
-            const chunk = 'x'.repeat(chunkSize);
-            for (let i = 0; i < Math.floor(totalChars / chunkSize); i++) out.push(chunk);
-            return out;
+    test('a terminator-free stream triggers zero scan-bytes regardless of length', () => {
+        for (const total of [80_000, 320_000]) {
+            const buf = new SentenceBuffer();
+            for (const c of makeChunks(total, 5, 'x')) buf.push(c);
+            expect(buf.appendedBytes).toBe(total);
+            // The fast path is taken on every push — no splitSentences scan ever runs.
+            expect(buf.scannedBytes).toBe(0);
         }
-        // Bigger sizes (and a few warm-up rounds) so timing variance at the
-        // sub-millisecond scale doesn't dominate the ratio.
-        const small = makeChunks(80_000, 5);
-        const big = makeChunks(320_000, 5);
-        for (let i = 0; i < 3; i++) {
-            streamPushAll(small);
-            streamPushAll(big);
+    });
+
+    test('scan-bytes ratio is near-linear (≤ 5×) for 4× input growth on terminator-bearing text', () => {
+        function streamScanBytes(totalChars: number, chunkSize: number): { scanned: number; appended: number } {
+            const buf = new SentenceBuffer();
+            // Repeating pattern with a sentence terminator every ~80 chars to
+            // exercise the actual scan path.
+            const pattern = 'lorem ipsum dolor sit amet consectetur. ';
+            const chunks: string[] = [];
+            let built = '';
+            while (built.length < totalChars) built += pattern;
+            for (let i = 0; i < built.length; i += chunkSize) {
+                chunks.push(built.slice(i, i + chunkSize));
+            }
+            for (const c of chunks) buf.push(c);
+            return { scanned: buf.scannedBytes, appended: buf.appendedBytes };
         }
-        const tN = streamPushAll(small);
-        const t4N = streamPushAll(big);
-        const ratio = t4N / Math.max(tN, 0.001);
-        console.log(`[perf] SentenceBuffer push 80k vs 320k chars (5-char chunks): ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        // Pre-fix the ratio was ~14; post-fix it should be near-linear.
-        expect(ratio).toBeLessThan(6);
+        const small = streamScanBytes(80_000, 5);
+        const big = streamScanBytes(320_000, 5);
+        // eslint-disable-next-line no-console
+        console.log(`[perf] SentenceBuffer scan-bytes: small=${small.scanned} (appended ${small.appended}), big=${big.scanned} (appended ${big.appended})`);
+        const ratio = big.scanned / Math.max(small.scanned, 1);
+        // Linear would be 4; quadratic would be 16. Allow generous headroom for
+        // the small remainder kept across pushes — the metric is deterministic
+        // so this only catches a real complexity regression.
+        expect(ratio).toBeLessThan(5);
+        // And the absolute bound: scan-bytes must stay a small constant
+        // multiple of appended bytes (linear in section length).
+        expect(big.scanned).toBeLessThan(big.appended * 4);
     });
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Issue: fixupLinks runs a global regex over the entire accumulated markdown
-// every time a chunk arrives. With render-throttle gating the call site
-// somewhat, but the final replace in sectionDone *always* runs once, and
-// during streaming chunks land roughly every 100ms. Over a long section the
-// regex pass over already-fixed-up text repeats unboundedly.
+// Issue: every throttled chunk render re-ran fixupLinks + renderMarkdownToHtml
+// over the full accumulated body, giving O(N²) total bytes-rendered across a
+// section's lifetime. The fix tracks a settledUpTo offset and only renders
+// the slice past that boundary (plus a small unsettled tail).
+//
+// Assertion: total bytes processed by the renderer stays linear in the body
+// length, independent of how many render calls are issued. Pre-fix the ratio
+// for a 4× longer body was ~16× (quadratic); post-fix it should be near 4×.
 // ───────────────────────────────────────────────────────────────────────────
-describe('[perf] sink chunk render is sub-quadratic in section length', () => {
+describe('[perf] sink renderer processes each byte O(1) times across a section', () => {
     function fileTarget(): NarrationTarget {
         return { kind: 'file', uri: vscode.Uri.parse('file:///foo.ts') as unknown as vscode.Uri };
     }
@@ -251,14 +269,13 @@ describe('[perf] sink chunk render is sub-quadratic in section length', () => {
         return { postMessage: () => Promise.resolve(true) };
     }
 
-    function simulate(chunks: number): number {
-        // The render path in sink.ts is gated by a 100ms throttle. To
-        // exercise the per-chunk cost deterministically, monkey-patch
-        // Date.now so every chunk crosses the throttle boundary.
+    function streamSection(chunks: number): { rendered: number; bodyBytes: number } {
+        // Force every chunk past the 100ms throttle by advancing Date.now.
         const realNow = Date.now;
         let virtualNow = 1_000_000;
         Date.now = () => (virtualNow += 1000);
         try {
+            resetSinkRenderBytesProcessed();
             const sink = buildNarrationSink({
                 webview: silentWebview() as any,
                 token: liveToken(),
@@ -267,30 +284,29 @@ describe('[perf] sink chunk render is sub-quadratic in section length', () => {
                 sectionRanges: [],
             });
             sink({ kind: 'init', sections: [{ id: 'a' }] });
-            // Use a chunk ending in `\n\n` so the incremental path settles each
-            // chunk into the prefix — this is the common shape of streamed
-            // paragraph-style narration.
             const chunk = '[foo](narrate://lines/L1-L10) some text here.\n\n';
-            const start = performance.now();
             for (let i = 0; i < chunks; i++) {
                 sink({ kind: 'chunk', sectionId: 'a', text: chunk });
             }
             sink({ kind: 'sectionDone', sectionId: 'a' });
-            return performance.now() - start;
+            return { rendered: getSinkRenderBytesProcessed(), bodyBytes: chunks * chunk.length };
         } finally {
             Date.now = realNow;
         }
     }
 
-    test('per-chunk render cost stays near-linear as the body grows', () => {
-        // Warm-up.
-        simulate(200);
-        const tN = simulate(500);
-        const t4N = simulate(2000);
-        const ratio = t4N / Math.max(tN, 0.001);
-        console.log(`[perf] sink chunk render 500 vs 2000 chunks: ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        // Pre-fix the ratio was ~19; the incremental render brings it under 6.
+    test('total render bytes scales linearly with body length, not chunk count squared', () => {
+        const small = streamSection(500);
+        const big = streamSection(2000);
+        // eslint-disable-next-line no-console
+        console.log(`[perf] sink render bytes: small=${small.rendered} (body ${small.bodyBytes}), big=${big.rendered} (body ${big.bodyBytes})`);
+        const ratio = big.rendered / Math.max(small.rendered, 1);
+        // Linear would be 4; quadratic would be 16. Deterministic metric, so
+        // any value materially above 4 indicates a real regression.
         expect(ratio).toBeLessThan(6);
+        // And absolute: each body byte should be rendered at most a small
+        // constant number of times across the section's lifetime.
+        expect(big.rendered).toBeLessThan(big.bodyBytes * 3);
     });
 });
 
