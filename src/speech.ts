@@ -126,10 +126,23 @@ function isAbbreviation(text: string, sentenceStart: number, periodIndex: number
  */
 export class SentenceBuffer {
     private pending = '';
+    /**
+     * True when `pending` is known to contain no `.`/`!`/`?`. Maintained
+     * across pushes so a long run of terminator-free chunks accumulates in
+     * `pending` without re-scanning all of it on every push.
+     */
+    private pendingHasNoTerminator = true;
 
     /** Add a streamed markdown chunk. Returns any sentences that are now complete. */
     push(chunk: string): string[] {
         if (!chunk) return [];
+        const chunkHasTerm = hasTerminator(chunk);
+        // Fast path: if neither the existing pending nor the new chunk holds
+        // any terminator, there cannot be a sentence boundary. Append and exit.
+        if (!chunkHasTerm && this.pendingHasNoTerminator) {
+            this.pending += chunk;
+            return [];
+        }
         this.pending += chunk;
         // If the buffer ends right at a terminator (no whitespace after), hold
         // the last sentence back — it could be part of a yet-incomplete
@@ -142,6 +155,7 @@ export class SentenceBuffer {
         } else {
             this.pending = remainder;
         }
+        this.pendingHasNoTerminator = !hasTerminator(this.pending);
         const speakable: string[] = [];
         for (const s of sentences) {
             const spoken = markdownToSpeech(s);
@@ -157,6 +171,7 @@ export class SentenceBuffer {
     flush(): string[] {
         const tail = this.pending.trim();
         this.pending = '';
+        this.pendingHasNoTerminator = true;
         if (!tail) return [];
         const spoken = markdownToSpeech(tail);
         return spoken.length > 0 ? [spoken] : [];
@@ -165,5 +180,15 @@ export class SentenceBuffer {
     /** Discard buffered content without emitting. */
     reset(): void {
         this.pending = '';
+        this.pendingHasNoTerminator = true;
     }
+}
+
+function hasTerminator(s: string): boolean {
+    for (let i = 0; i < s.length; i++) {
+        const ch = s.charCodeAt(i);
+        // '.' = 46, '!' = 33, '?' = 63
+        if (ch === 46 || ch === 33 || ch === 63) return true;
+    }
+    return false;
 }

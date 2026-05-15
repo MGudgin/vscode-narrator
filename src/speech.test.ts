@@ -130,4 +130,26 @@ describe('SentenceBuffer', () => {
         // The trailing space disambiguates `Done.` as a complete sentence.
         expect(buf.push('First. Second. ')).toEqual(['First.', 'Second.']);
     });
+
+    test('a long terminator-free run followed by a terminator is detected', () => {
+        // Regression for #75: the cheap-path that skips re-scanning when no
+        // terminator is present must not lose track when a terminator finally
+        // arrives. Many chunks of plain text with no `.`/`!`/`?` then one
+        // chunk closing the sentence.
+        const buf = new SentenceBuffer();
+        for (let i = 0; i < 50; i++) expect(buf.push('lorem ')).toEqual([]);
+        expect(buf.push('ipsum. ')).toEqual([
+            ('lorem '.repeat(50) + 'ipsum.').trim(),
+        ]);
+    });
+
+    test('terminator landing as the first character of a new chunk still splits', () => {
+        // Regression for #75: ensure the boundary check considers prior
+        // pending content even when the new chunk is just a terminator.
+        const buf = new SentenceBuffer();
+        expect(buf.push('Hello world')).toEqual([]);
+        expect(buf.push('.')).toEqual([]);
+        // The trailing space confirms `.` as a terminator.
+        expect(buf.push(' Next.')).toEqual(['Hello world.']);
+    });
 });

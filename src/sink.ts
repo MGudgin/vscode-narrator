@@ -9,11 +9,52 @@ const RENDER_THROTTLE_MS = 100;
 
 interface SectionState {
     accumulated: string;
+    /**
+     * Offset in `accumulated` whose prefix has already been rendered to
+     * `settledHtml`. Incremental chunk renders only run `fixupLinks` +
+     * `renderMarkdownToHtml` over the small slice past this offset, so the
+     * total work per section is linear in body length instead of quadratic.
+     */
+    settledUpTo: number;
+    /** HTML for `accumulated.slice(0, settledUpTo)`, built incrementally. */
+    settledHtml: string;
     lastRender: number;
     static: boolean;
     status: SectionStatus;
     linkUri: vscode.Uri;
     speech: SentenceBuffer;
+}
+
+/**
+ * Largest offset `<= end` at which the markdown prefix ends at a paragraph
+ * boundary (blank-line separator). Returns -1 when no such boundary exists
+ * past `min`.
+ *
+ * Rendering at a paragraph boundary is the chunk-safety guarantee: a blank
+ * line separates the settled prefix from anything that follows, so partial
+ * constructs like `[link text` waiting for its `](url)` cannot straddle the
+ * cut.
+ */
+function lastBlockBoundary(s: string, min: number, end: number): number {
+    if (end <= min) return -1;
+    const idx = s.lastIndexOf('\n\n', end - 1);
+    return idx >= min ? idx + 2 : -1;
+}
+
+function finalSectionHtml(state: SectionState): string {
+    if (state.accumulated.trim().length === 0) {
+        return renderMarkdownToHtml(
+            fixupLinks('_(no narration produced for this section.)_', state.linkUri),
+        );
+    }
+    // Reuse the incrementally-built settled prefix and render only the tail.
+    const tail = state.accumulated.slice(state.settledUpTo);
+    const tailHtml = tail.length > 0
+        ? renderMarkdownToHtml(fixupLinks(tail, state.linkUri))
+        : '';
+    state.settledHtml += tailHtml;
+    state.settledUpTo = state.accumulated.length;
+    return state.settledHtml;
 }
 
 export interface SinkParams {
@@ -61,8 +102,11 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
                         : '';
                     const isStatic = !!s.bodyMarkdown;
                     const initialStatus: SectionStatus = isStatic ? 'complete' : 'queued';
+                    const accumulated = s.bodyMarkdown ?? '';
                     sectionState.set(s.id, {
-                        accumulated: s.bodyMarkdown ?? '',
+                        accumulated,
+                        settledUpTo: accumulated.length,
+                        settledHtml: bodyHtml,
                         lastRender: 0,
                         static: isStatic,
                         status: initialStatus,
@@ -122,14 +166,33 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
                 const now = Date.now();
                 if (now - state.lastRender < RENDER_THROTTLE_MS) return;
                 state.lastRender = now;
-                const html = renderMarkdownToHtml(fixupLinks(state.accumulated, state.linkUri));
-                void webview.postMessage({ kind: 'replace', sectionId: event.sectionId, bodyHtml: html });
+                const boundary = lastBlockBoundary(
+                    state.accumulated,
+                    state.settledUpTo,
+                    state.accumulated.length,
+                );
+                if (boundary > state.settledUpTo) {
+                    const newlySettled = state.accumulated.slice(state.settledUpTo, boundary);
+                    state.settledHtml += renderMarkdownToHtml(fixupLinks(newlySettled, state.linkUri));
+                    state.settledUpTo = boundary;
+                }
+                const tail = state.accumulated.slice(state.settledUpTo);
+                const tailHtml = tail.length > 0
+                    ? renderMarkdownToHtml(fixupLinks(tail, state.linkUri))
+                    : '';
+                void webview.postMessage({
+                    kind: 'replace',
+                    sectionId: event.sectionId,
+                    bodyHtml: state.settledHtml + tailHtml,
+                });
                 break;
             }
             case 'sectionReset': {
                 const state = sectionState.get(event.sectionId);
                 if (!state || state.static) return;
                 state.accumulated = '';
+                state.settledUpTo = 0;
+                state.settledHtml = '';
                 state.lastRender = 0;
                 state.status = 'streaming';
                 state.speech.reset();
@@ -155,10 +218,7 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
                 if (!state) return;
                 state.status = 'complete';
                 if (!state.static) {
-                    const md = state.accumulated.trim().length > 0
-                        ? state.accumulated
-                        : '_(no narration produced for this section.)_';
-                    const html = renderMarkdownToHtml(fixupLinks(md, state.linkUri));
+                    const html = finalSectionHtml(state);
                     void webview.postMessage({
                         kind: 'replace',
                         sectionId: event.sectionId,
@@ -188,10 +248,7 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
                 for (const [id, state] of sectionState) {
                     if (state.status === 'complete') continue;
                     if (!state.static) {
-                        const md = state.accumulated.trim().length > 0
-                            ? state.accumulated
-                            : '_(no narration produced for this section.)_';
-                        const html = renderMarkdownToHtml(fixupLinks(md, state.linkUri));
+                        const html = finalSectionHtml(state);
                         void webview.postMessage({ kind: 'replace', sectionId: id, bodyHtml: html });
                         for (const sentence of state.speech.flush()) {
                             void webview.postMessage({

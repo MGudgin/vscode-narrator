@@ -6,6 +6,7 @@ const MAX_ENTRIES = 200;
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
+    public writeCount = 0;
     keys(): readonly string[] { return Array.from(this.store.keys()); }
     get<T>(key: string): T | undefined;
     get<T>(key: string, defaultValue: T): T;
@@ -13,6 +14,7 @@ class MemoryMemento implements vscode.Memento {
         return this.store.has(key) ? (this.store.get(key) as T) : (defaultValue as T | undefined);
     }
     async update(key: string, value: unknown): Promise<void> {
+        this.writeCount++;
         if (value === undefined) {
             this.store.delete(key);
         } else {
@@ -90,6 +92,13 @@ describe('NarrationCache LRU eviction', () => {
         expect(await cache.get('k1')).toBe('v1');
     });
 
+    test('get() on a hit issues no persistence writes', async () => {
+        await cache.set('k', 'v');
+        const writesBefore = memento.writeCount;
+        expect(await cache.get('k')).toBe('v');
+        expect(memento.writeCount - writesBefore).toBe(0);
+    });
+
     test('get() refreshes the timestamp so a touched entry survives eviction', async () => {
         await cache.set('keep', 'kept-value');
         // Fill enough entries so we are at exactly MAX_ENTRIES with 'keep' as the oldest.
@@ -118,7 +127,52 @@ describe('NarrationCache LRU eviction', () => {
         await cache.setMany([]);
         expect(await cache.get('pre')).toBe('existing');
     });
+
+    test('getMany returns a map containing every requested hit and skipping misses', async () => {
+        await cache.setMany([
+            { key: 'a', markdown: 'va' },
+            { key: 'b', markdown: 'vb' },
+            { key: 'c', markdown: 'vc' },
+        ]);
+        const hits = await cache.getMany(['a', 'missing', 'c']);
+        expect(hits.size).toBe(2);
+        expect(hits.get('a')).toBe('va');
+        expect(hits.get('c')).toBe('vc');
+        expect(hits.has('missing')).toBe(false);
+    });
+
+    test('getMany returns an empty map for an empty key list', async () => {
+        await cache.set('a', 'va');
+        const hits = await cache.getMany([]);
+        expect(hits.size).toBe(0);
+    });
+
+    test('getMany issues no persistence writes', async () => {
+        await cache.setMany([
+            { key: 'a', markdown: 'va' },
+            { key: 'b', markdown: 'vb' },
+        ]);
+        const writesBefore = memento.writeCount;
+        await cache.getMany(['a', 'b', 'missing']);
+        expect(memento.writeCount - writesBefore).toBe(0);
+    });
+
+    test('getMany still refreshes LRU recency so touched entries survive eviction', async () => {
+        // Fill to capacity with `keep` as the oldest.
+        await cache.set('keep', 'kept-value');
+        for (let i = 0; i < MAX_ENTRIES - 1; i++) {
+            await cache.set(`fill${i}`, `v${i}`);
+        }
+        // Read `keep` via getMany to bump its recency.
+        await cache.getMany(['keep']);
+        // Push two more entries; one must be evicted, and it must not be `keep`.
+        await cache.set('new1', 'n1');
+        await cache.set('new2', 'n2');
+        expect(await cache.get('keep')).toBe('kept-value');
+        expect(await cache.get('fill0')).toBeUndefined();
+    });
 });
+
 
 describe('NarrationCache resilience to corrupt persisted state', () => {
     let memento: MemoryMemento;
