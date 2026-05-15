@@ -216,11 +216,24 @@ function numberLinesInRange(doc: vscode.TextDocument, range: vscode.Range): stri
     const startLine = Math.min(Math.max(0, range.start.line), lastLine);
     const endLine = Math.min(Math.max(startLine, range.end.line), lastLine);
     const width = String(endLine + 1).length;
+    const fullRange = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).range.end.character);
+    const lines = splitDocLines(doc.getText(fullRange));
+    const expected = endLine - startLine + 1;
     const out: string[] = [];
-    for (let i = startLine; i <= endLine; i++) {
-        out.push(`${String(i + 1).padStart(width)}│ ${doc.lineAt(i).text}`);
+    for (let i = 0; i < expected; i++) {
+        const text = i < lines.length ? lines[i] : '';
+        out.push(`${String(startLine + i + 1).padStart(width)}│ ${text}`);
     }
     return out.join('\n');
+}
+
+function splitDocLines(text: string): string[] {
+    const parts = text.split('\n');
+    for (let i = 0; i < parts.length; i++) {
+        const p = parts[i];
+        if (p.length > 0 && p.charCodeAt(p.length - 1) === 13) parts[i] = p.slice(0, -1);
+    }
+    return parts;
 }
 
 const MAX_LINE = 1_000_000;

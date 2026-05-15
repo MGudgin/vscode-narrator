@@ -307,6 +307,77 @@ describe('getTreeDiff', () => {
         }
     });
 
+    test('fetches per-file diffs in parallel, not sequentially', async () => {
+        const FILES = 50;
+        const PER_FILE_DELAY_MS = 20;
+        const SEQUENTIAL_LOWER_BOUND_MS = 800; // floor on a 1000ms sequential run
+        const PARALLEL_BUDGET_MS = 400;
+
+        const changes: FakeGitChange[] = [];
+        const fileDiffs = new Map<string, string>();
+        for (let i = 0; i < FILES; i++) {
+            const uri = vscode.Uri.parse(`file:///r/f${i.toString().padStart(3, '0')}.ts`) as unknown as vscode.Uri;
+            changes.push({ uri, status: STATUS_MODIFIED });
+            fileDiffs.set(uri.fsPath, `D-${i}`);
+        }
+
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const slowRepo = {
+            rootUri: repoRoot,
+            state: { HEAD: {}, onDidChange: () => ({ dispose: () => {} }) },
+            async diffWith(_ref: string, path?: string) {
+                if (path === undefined) return changes;
+                inFlight++;
+                if (inFlight > maxInFlight) maxInFlight = inFlight;
+                await new Promise((resolve) => setTimeout(resolve, PER_FILE_DELAY_MS));
+                inFlight--;
+                return fileDiffs.get(path) ?? '';
+            },
+            async show() { return ''; },
+        };
+        installFakeGitExtension({ repos: [slowRepo as unknown as FakeRepo] });
+
+        const start = performance.now();
+        const result = await getTreeDiff(repoRoot, 'HEAD');
+        const elapsed = performance.now() - start;
+
+        expect(result.kind).toBe('modified');
+        // The parallel implementation must finish far faster than any
+        // sequential traversal would (50 * 20ms = 1000ms floor).
+        expect(elapsed).toBeLessThan(PARALLEL_BUDGET_MS);
+        expect(elapsed).toBeLessThan(SEQUENTIAL_LOWER_BOUND_MS);
+        // Concurrency is bounded — fan-out should not exceed the cap.
+        expect(maxInFlight).toBeGreaterThan(1);
+        expect(maxInFlight).toBeLessThanOrEqual(8);
+    });
+
+    test('per-file diff error tolerance is preserved under parallel fetch', async () => {
+        const aUri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const bUri = vscode.Uri.parse('file:///r/b.ts') as unknown as vscode.Uri;
+        const cUri = vscode.Uri.parse('file:///r/c.ts') as unknown as vscode.Uri;
+        const repo = makeFakeRepo({
+            rootUri: repoRoot,
+            changes: [
+                { uri: aUri, status: STATUS_MODIFIED },
+                { uri: bUri, status: STATUS_MODIFIED },
+                { uri: cUri, status: STATUS_MODIFIED },
+            ],
+            fileDiffs: new Map([[bUri.fsPath, 'B-DIFF']]),
+            fileDiffErrors: new Set([aUri.fsPath, cUri.fsPath]),
+        });
+        installFakeGitExtension({ repos: [repo] });
+
+        const result = await getTreeDiff(repoRoot, 'HEAD');
+        expect(result.kind).toBe('modified');
+        if (result.kind !== 'modified') return;
+        const a = result.changes.find((c) => c.uri.fsPath === aUri.fsPath);
+        const c = result.changes.find((c) => c.uri.fsPath === cUri.fsPath);
+        expect(a?.unifiedDiff).toBe('');
+        expect(c?.unifiedDiff).toBe('');
+        expect(result.combinedDiff).toContain('B-DIFF');
+    });
+
     test('falls back to api.getRepository(repoRoot) when no repositories entry matches', async () => {
         const otherRoot = vscode.Uri.parse('file:///other') as unknown as vscode.Uri;
         const repo = makeFakeRepo({

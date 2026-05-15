@@ -99,11 +99,11 @@ function clampRangeToDoc(range: vscode.Range, doc: vscode.TextDocument): vscode.
 export function flattenSymbols(
     symbols: vscode.DocumentSymbol[],
     parentPath: string = '',
+    out: vscode.DocumentSymbol[] = [],
 ): vscode.DocumentSymbol[] {
-    const result: vscode.DocumentSymbol[] = [];
     for (const s of symbols) {
         const qualified = parentPath ? `${parentPath}.${s.name}` : s.name;
-        result.push({
+        out.push({
             name: qualified,
             detail: s.detail,
             kind: s.kind,
@@ -112,10 +112,10 @@ export function flattenSymbols(
             children: [],
         } as vscode.DocumentSymbol);
         if (s.children && s.children.length > 0) {
-            result.push(...flattenSymbols(s.children, qualified));
+            flattenSymbols(s.children, qualified, out);
         }
     }
-    return result;
+    return out;
 }
 
 async function fetchTopLevelSymbols(doc: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {

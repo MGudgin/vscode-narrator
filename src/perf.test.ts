@@ -10,7 +10,7 @@ import * as vscode from 'vscode';
 import { NarrationCache } from './cache';
 import { flattenSymbols } from './symbols';
 import { SentenceBuffer } from './speech';
-import { fixupLinks } from './prompt';
+import { fixupLinks, buildUserPromptForRange } from './prompt';
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -52,6 +52,23 @@ function measure(label: string, fn: () => void | Promise<void>): Promise<number>
     // eslint-disable-next-line no-console
     console.log(`[perf] ${label}: ${elapsed.toFixed(2)} ms`);
     return Promise.resolve(elapsed);
+}
+
+// Best-of-N microbenchmark: take the minimum elapsed across `samples` runs to
+// filter CI neighbour noise and GC pauses. Single-sample timings of fast
+// (sub-10 ms) operations are too variance-prone to assert tight ratios against.
+async function measureBest(label: string, fn: () => void | Promise<void>, samples = 5): Promise<number> {
+    let best = Infinity;
+    for (let i = 0; i < samples; i++) {
+        const start = performance.now();
+        const r = fn();
+        if (r instanceof Promise) await r;
+        const elapsed = performance.now() - start;
+        if (elapsed < best) best = elapsed;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[perf] ${label}: best ${best.toFixed(2)} ms (of ${samples})`);
+    return best;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -140,22 +157,22 @@ describe('[perf] flattenSymbols scaling on deep symbol trees', () => {
         return [node];
     }
 
-    test('flat output size grows linearly but timing super-linearly with depth', async () => {
-        const N = 500;
+    test('flat output size grows linearly and timing stays near-linear with depth', async () => {
+        const N = 1000;
         const FOURX = N * 4;
-        const tn = await measure(`flattenSymbols depth=${N}`, () => {
+        // Warm-up so V8 inlining / GC settles before any timed run.
+        flattenSymbols(makeDeepTree(N));
+        flattenSymbols(makeDeepTree(FOURX));
+        const tn = await measureBest(`flattenSymbols depth=${N}`, () => {
             flattenSymbols(makeDeepTree(N));
         });
-        const t4n = await measure(`flattenSymbols depth=${FOURX}`, () => {
+        const t4n = await measureBest(`flattenSymbols depth=${FOURX}`, () => {
             flattenSymbols(makeDeepTree(FOURX));
         });
-        // Strictly linear would be ratio ~4. Quadratic would be ~16. We
-        // assert better than full quadratic but worse than linear is fine
-        // for now — the fix should push it down to ratio < 8.
         const ratio = t4n / Math.max(tn, 0.001);
         // eslint-disable-next-line no-console
         console.log(`[perf] flattenSymbols 4x ratio = ${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        expect(t4n).toBeGreaterThan(0);
+        expect(ratio).toBeLessThan(5);
     });
 });
 
@@ -222,5 +239,57 @@ describe('[perf] fixupLinks scans whole accumulated body each call', () => {
         // eslint-disable-next-line no-console
         console.log(`[perf] fixupLinks per-chunk over growing buffer: ${tN.toFixed(2)}ms vs ${t4N.toFixed(2)}ms, ratio=${ratio.toFixed(2)} (linear=4, quadratic=16)`);
         expect(tN).toBeGreaterThan(0);
+    });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Issue: numberLinesInRange iterates doc.lineAt(i).text per line. lineAt
+// allocates a TextLine object every call. For a 10000-line range that's
+// 10000 allocations + 10000 .text gets. After the fix this single range
+// is rendered via one doc.getText(range).split('\n') pass.
+// ───────────────────────────────────────────────────────────────────────────
+describe('[perf] numberLinesInRange avoids per-line lineAt allocations', () => {
+    function makePerfDoc(lines: string[]): vscode.TextDocument {
+        const text = lines.join('\n');
+        return {
+            uri: vscode.Uri.parse('file:///big.ts') as unknown as vscode.Uri,
+            languageId: 'typescript',
+            lineCount: lines.length,
+            getText: (range?: vscode.Range) => {
+                if (!range) return text;
+                const parts: string[] = [];
+                const startLine = range.start.line;
+                const endLine = range.end.line;
+                for (let i = startLine; i <= endLine && i < lines.length; i++) {
+                    const line = lines[i] ?? '';
+                    if (i === startLine && i === endLine) {
+                        parts.push(line.slice(range.start.character, range.end.character));
+                    } else if (i === startLine) {
+                        parts.push(line.slice(range.start.character));
+                    } else if (i === endLine) {
+                        parts.push(line.slice(0, range.end.character));
+                    } else {
+                        parts.push(line);
+                    }
+                }
+                return parts.join('\n');
+            },
+            lineAt: (line: number) => ({
+                text: lines[line] ?? '',
+                range: new vscode.Range(line, 0, line, (lines[line] ?? '').length),
+            }),
+        } as unknown as vscode.TextDocument;
+    }
+
+    test('rendering a 10000-line range completes well under 100 ms', async () => {
+        const N = 10_000;
+        const lines = Array.from({ length: N }, (_, i) => `const value${i} = ${i};`);
+        const doc = makePerfDoc(lines);
+        // Warm-up.
+        buildUserPromptForRange(doc, 0, N - 1);
+        const elapsed = await measure('numberLinesInRange 10000 lines', () => {
+            buildUserPromptForRange(doc, 0, N - 1);
+        });
+        expect(elapsed).toBeLessThan(100);
     });
 });
