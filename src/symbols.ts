@@ -65,17 +65,18 @@ export async function getNarrationUnits(
         }
     }
 
+    const lastDocLine = Math.max(0, doc.lineCount - 1);
     for (const sym of sorted) {
+        const clampedRange = clampRangeToDoc(sym.range, doc);
         units.push({
             kind: 'symbol',
             name: sym.name,
-            range: sym.range,
+            range: clampedRange,
             detail: sym.detail,
         });
     }
 
     const lastEnd = sorted[sorted.length - 1].range.end;
-    const lastDocLine = doc.lineCount - 1;
     if (lastEnd.line < lastDocLine) {
         const postRange = new vscode.Range(lastEnd.line + 1, 0, lastDocLine, doc.lineAt(lastDocLine).range.end.character);
         if (doc.getText(postRange).trim().length > 0) {
@@ -84,6 +85,15 @@ export async function getNarrationUnits(
     }
 
     return units;
+}
+
+function clampRangeToDoc(range: vscode.Range, doc: vscode.TextDocument): vscode.Range {
+    const lastLine = Math.max(0, doc.lineCount - 1);
+    if (range.end.line <= lastLine && range.start.line <= lastLine) return range;
+    const clampedStartLine = Math.min(range.start.line, lastLine);
+    const clampedEndLine = Math.min(range.end.line, lastLine);
+    const endChar = doc.lineAt(clampedEndLine).range.end.character;
+    return new vscode.Range(clampedStartLine, range.start.character, clampedEndLine, endChar);
 }
 
 export function flattenSymbols(
