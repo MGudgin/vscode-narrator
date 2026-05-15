@@ -78,10 +78,42 @@ export function buildUserPrompt(doc: vscode.TextDocument): string {
     return `File: ${path}\nLanguage: ${doc.languageId}\n\nSource:\n${numbered}`;
 }
 
+export function buildUserPromptForRange(
+    doc: vscode.TextDocument,
+    startLine: number,
+    endLine: number,
+): string {
+    const path = vscode.workspace.asRelativePath(doc.uri);
+    const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).range.end.character);
+    const numbered = numberLinesInRange(doc, range);
+    const totalLines = doc.lineCount;
+    const chunkStart = startLine + 1;
+    const chunkEnd = endLine + 1;
+    const chunkNote = `Chunk lines L${chunkStart}-L${chunkEnd} of full file L1-L${totalLines}. This is one sub-chunk of an oversized file; narrate only what is in this chunk.`;
+    return `File: ${path}\nLanguage: ${doc.languageId}\n${chunkNote}\n\nSource:\n${numbered}`;
+}
+
 export function buildDiffUserPrompt(doc: vscode.TextDocument, baseRef: string, unifiedDiff: string): string {
     const path = vscode.workspace.asRelativePath(doc.uri);
     const numbered = numberLines(doc.getText());
     return `File: ${path}\nLanguage: ${doc.languageId}\nDiff base: ${baseRef}\n\nUnified diff:\n${unifiedDiff}\n\nCurrent (post-change) source:\n${numbered}`;
+}
+
+export function buildDiffUserPromptForRange(
+    doc: vscode.TextDocument,
+    baseRef: string,
+    unifiedDiff: string,
+    startLine: number,
+    endLine: number,
+): string {
+    const path = vscode.workspace.asRelativePath(doc.uri);
+    const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).range.end.character);
+    const numbered = numberLinesInRange(doc, range);
+    const totalLines = doc.lineCount;
+    const chunkStart = startLine + 1;
+    const chunkEnd = endLine + 1;
+    const chunkNote = `Chunk lines L${chunkStart}-L${chunkEnd} of full file L1-L${totalLines}. This is one sub-chunk of an oversized change; narrate only what is in this chunk, using the unified diff to spot what changed within this range.`;
+    return `File: ${path}\nLanguage: ${doc.languageId}\nDiff base: ${baseRef}\n${chunkNote}\n\nUnified diff:\n${unifiedDiff}\n\nCurrent (post-change) source (sub-chunk):\n${numbered}`;
 }
 
 export function buildTreeSummaryPrompt(
@@ -187,12 +219,20 @@ function numberLinesInRange(doc: vscode.TextDocument, range: vscode.Range): stri
     return out.join('\n');
 }
 
+const MAX_LINE = 1_000_000;
+
+function clampLine(raw: string, floor: number): number {
+    const parsed = parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return floor;
+    return Math.min(MAX_LINE, Math.max(floor, parsed - 1));
+}
+
 export function fixupLinks(markdown: string, docUri: vscode.Uri): string {
     return markdown.replace(
         /narrate:\/\/lines\/L(\d+)(?:-L(\d+))?/g,
         (_match, startStr: string, endStr: string | undefined) => {
-            const startLine = Math.max(0, parseInt(startStr, 10) - 1);
-            const endLine = endStr ? Math.max(startLine, parseInt(endStr, 10) - 1) : startLine;
+            const startLine = clampLine(startStr, 0);
+            const endLine = endStr ? clampLine(endStr, startLine) : startLine;
             const range = {
                 start: { line: startLine, character: 0 },
                 end: { line: endLine, character: Number.MAX_SAFE_INTEGER },
