@@ -563,10 +563,25 @@ async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
     }
 }
 
+export interface RangeLike {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+}
+
+export function isValidRange(r: unknown): r is RangeLike {
+    if (!r || typeof r !== 'object') return false;
+    const x = r as { start?: { line?: unknown; character?: unknown }; end?: { line?: unknown; character?: unknown } };
+    return Number.isFinite(x.start?.line)
+        && Number.isFinite(x.start?.character)
+        && Number.isFinite(x.end?.line)
+        && Number.isFinite(x.end?.character);
+}
+
 async function revealLocation(
-    uriStr: string,
-    rangeLike: { start: { line: number; character: number }; end: { line: number; character: number } },
+    uriStr: unknown,
+    rangeLike: unknown,
 ): Promise<void> {
+    if (typeof uriStr !== 'string') return;
     let uri: vscode.Uri;
     try {
         uri = vscode.Uri.parse(uriStr, true);
@@ -583,14 +598,16 @@ async function revealLocation(
         return;
     }
     const doc = await vscode.workspace.openTextDocument(uri);
-    const range = new vscode.Range(
-        rangeLike.start.line,
-        rangeLike.start.character,
-        rangeLike.end.line,
-        rangeLike.end.character,
-    );
+    const selection = isValidRange(rangeLike)
+        ? new vscode.Range(
+            rangeLike.start.line,
+            rangeLike.start.character,
+            rangeLike.end.line,
+            rangeLike.end.character,
+        )
+        : new vscode.Range(0, 0, 0, 0);
     await vscode.window.showTextDocument(doc, {
-        selection: range,
+        selection,
         viewColumn: vscode.ViewColumn.One,
         preserveFocus: false,
     });

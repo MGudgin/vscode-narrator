@@ -202,3 +202,10 @@ export function fixupLinks(markdown: string, docUri: vscode.Uri): string {
         },
     );
 }
+
+export function stripNarrateLinks(markdown: string): string {
+    return markdown.replace(
+        /\[([^\]]*)\]\(narrate:\/\/lines\/L\d+(?:-L\d+)?\)/g,
+        '$1',
+    );
+}

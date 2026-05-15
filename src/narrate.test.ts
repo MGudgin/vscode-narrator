@@ -622,6 +622,64 @@ describe('narrateTreeDiff', () => {
         expect(summaryPromptCall?.userPrompt).toContain('[renamed] src/old.ts → src/new.ts');
     });
 
+    test('deleted file: inline narrate-links are stripped to plain text, no reveal URI emitted', async () => {
+        const deletedUri = vscode.Uri.parse('file:///foo/repo/src/gone.ts') as unknown as vscode.Uri;
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ d',
+            changes: [{
+                uri: deletedUri,
+                status: 'deleted',
+                unifiedDiff: '@@ d',
+            }],
+        };
+        const { options, cache } = makeOptions({ fetchTreeDiff: async () => tree });
+        // Per-file provider: emit a narrate-link only in the deleted file's section body.
+        // Summary section gets neutral prose so we can isolate the deleted-file behaviour.
+        const provider: NarrationProvider = {
+            async *stream(_systemPrompt: string, userPrompt: string) {
+                if (userPrompt.includes('Status: deleted')) {
+                    yield 'Removed [some helper](narrate://lines/L5) earlier this week.';
+                } else {
+                    yield 'overview text.';
+                }
+            },
+        };
+        const { sink } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const stored = await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo));
+        expect(stored).toBeDefined();
+        // The deleted-file section's body must NOT contain a command URI
+        // pointing at the deleted path — that would open a non-existent file.
+        expect(stored).not.toContain(deletedUri.toString());
+        expect(stored).not.toContain('command:codeNarration.reveal');
+        expect(stored).not.toContain('narrate://lines');
+        // The bracketed link text survives as plain text so the prose still reads naturally.
+        expect(stored).toContain('some helper');
+    });
+
+    test('deleted file: section init has linkUri undefined to avoid opening the deleted path', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ d2',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/src/gone2.ts') as unknown as vscode.Uri,
+                status: 'deleted',
+                unifiedDiff: '@@ d2',
+            }],
+        };
+        const { options } = makeOptions({ fetchTreeDiff: async () => tree });
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', chunkProvider(['body.']), liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const deletedSection = init.sections.find((s) => s.id === 'f0');
+        expect(deletedSection?.linkUri).toBeUndefined();
+    });
+
     test('does not write the cache when any per-file section fails', async () => {
         const tree: TreeDiffResult = {
             kind: 'modified',
