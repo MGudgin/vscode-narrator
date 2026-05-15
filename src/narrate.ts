@@ -18,6 +18,7 @@ import {
     buildTreeSummaryPrompt,
     buildTreeFileDiffPrompt,
     fixupLinks,
+    stripNarrateLinks,
 } from './prompt';
 import { withTransientRetry } from './retry';
 import {
@@ -215,7 +216,7 @@ export async function narrateTreeDiff(
         id: `f${i}`,
         kind: 'file',
         headingMarkdown: buildTreeFileHeading(repoRoot, change),
-        linkUri: change.uri,
+        linkUri: change.status === 'deleted' ? undefined : change.uri,
         change,
         accumulated: '',
     }));
@@ -274,8 +275,9 @@ export async function narrateTreeDiff(
     if (!anyFailure) {
         const finalMd = allSections
             .map((s) => {
-                const linkUri = s.linkUri ?? repoRoot;
-                const body = fixupLinks(s.accumulated, linkUri).trim()
+                const body = (s.kind === 'file' && s.change?.status === 'deleted'
+                    ? stripNarrateLinks(s.accumulated)
+                    : fixupLinks(s.accumulated, s.linkUri ?? repoRoot)).trim()
                     || '_(no narration produced for this section.)_';
                 return `${s.headingMarkdown}\n\n${body}`;
             })

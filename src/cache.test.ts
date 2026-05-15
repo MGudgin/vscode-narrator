@@ -120,6 +120,58 @@ describe('NarrationCache LRU eviction', () => {
     });
 });
 
+describe('NarrationCache resilience to corrupt persisted state', () => {
+    let memento: MemoryMemento;
+    let cache: NarrationCache;
+    const STATE_KEY = 'codeNarration.cache.v1';
+
+    beforeEach(() => {
+        memento = new MemoryMemento();
+        cache = new NarrationCache(memento);
+    });
+
+    test('returns undefined when state is a non-array object', async () => {
+        await memento.update(STATE_KEY, { wrong: 'shape' });
+        await expect(cache.get('any')).resolves.toBeUndefined();
+    });
+
+    test('returns undefined when state is null', async () => {
+        await memento.update(STATE_KEY, null);
+        await expect(cache.get('any')).resolves.toBeUndefined();
+    });
+
+    test('returns undefined when state is a string', async () => {
+        await memento.update(STATE_KEY, 'not-an-array');
+        await expect(cache.get('any')).resolves.toBeUndefined();
+    });
+
+    test('returns undefined when state is a number', async () => {
+        await memento.update(STATE_KEY, 42);
+        await expect(cache.get('any')).resolves.toBeUndefined();
+    });
+
+    test('skips malformed entries inside a partially-corrupt array', async () => {
+        await memento.update(STATE_KEY, [
+            { key: 'good', markdown: 'value', timestamp: 1 },
+            null,
+            'not-an-entry',
+            { key: 'no-markdown', timestamp: 2 },
+            { key: 'wrong-types', markdown: 5, timestamp: 'oops' },
+            { key: 'good2', markdown: 'value2', timestamp: 3 },
+        ]);
+        expect(await cache.get('good')).toBe('value');
+        expect(await cache.get('good2')).toBe('value2');
+        expect(await cache.get('no-markdown')).toBeUndefined();
+        expect(await cache.get('wrong-types')).toBeUndefined();
+    });
+
+    test('set() recovers a bricked cache by overwriting corrupt state', async () => {
+        await memento.update(STATE_KEY, { wrong: 'shape' });
+        await cache.set('k', 'v');
+        expect(await cache.get('k')).toBe('v');
+    });
+});
+
 describe('cache key builders', () => {
     const uri = vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri;
     const provider = { kind: 'anthropic', model: 'claude-sonnet-4-6' };

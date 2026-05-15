@@ -13,6 +13,15 @@ interface CacheEntry {
     timestamp: number;
 }
 
+function isCacheEntry(value: unknown): value is CacheEntry {
+    if (!value || typeof value !== 'object') return false;
+    const e = value as { key?: unknown; markdown?: unknown; timestamp?: unknown };
+    return typeof e.key === 'string'
+        && typeof e.markdown === 'string'
+        && typeof e.timestamp === 'number'
+        && Number.isFinite(e.timestamp);
+}
+
 export class NarrationCache {
     constructor(private readonly state: vscode.Memento) {}
 
@@ -53,7 +62,9 @@ export class NarrationCache {
     }
 
     private read(): CacheEntry[] {
-        return this.state.get<CacheEntry[]>(STATE_KEY, []);
+        const raw = this.state.get<unknown>(STATE_KEY, []);
+        if (!Array.isArray(raw)) return [];
+        return raw.filter(isCacheEntry);
     }
 }
 

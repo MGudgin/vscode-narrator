@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import * as vscode from 'vscode';
-import { fixupLinks, buildUserPrompt, buildDiffUserPrompt } from './prompt';
+import { fixupLinks, stripNarrateLinks, buildUserPrompt, buildDiffUserPrompt } from './prompt';
 
 const docUri = vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri;
 
@@ -75,6 +75,33 @@ describe('fixupLinks', () => {
         expect(args[1].end.line).toBeLessThanOrEqual(1_000_000);
         expect(Number.isSafeInteger(args[1].start.line)).toBe(true);
         expect(Number.isSafeInteger(args[1].end.line)).toBe(true);
+    });
+});
+
+describe('stripNarrateLinks', () => {
+    test('replaces a narrate-link with its bracketed text', () => {
+        expect(stripNarrateLinks('see [helper](narrate://lines/L5) here'))
+            .toBe('see helper here');
+    });
+
+    test('replaces a narrate-range link with its bracketed text', () => {
+        expect(stripNarrateLinks('see [block](narrate://lines/L5-L10) here'))
+            .toBe('see block here');
+    });
+
+    test('strips multiple links and never leaves a narrate:// URI behind', () => {
+        const stripped = stripNarrateLinks('[a](narrate://lines/L1) and [b](narrate://lines/L2-L5)');
+        expect(stripped).toBe('a and b');
+        expect(stripped).not.toContain('narrate://');
+    });
+
+    test('leaves non-narrate links alone', () => {
+        const md = '[external](https://example.com) and [code](narrate://lines/L1)';
+        expect(stripNarrateLinks(md)).toBe('[external](https://example.com) and code');
+    });
+
+    test('leaves plain text untouched', () => {
+        expect(stripNarrateLinks('just prose')).toBe('just prose');
     });
 });
 
