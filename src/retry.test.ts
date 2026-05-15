@@ -11,7 +11,7 @@ import {
     PermissionDeniedError,
     RateLimitError,
 } from '@anthropic-ai/sdk';
-import { computeBackoffMs, isTransientError, withTransientRetry } from './retry';
+import { StreamIdleTimeoutError, computeBackoffMs, isTransientError, withIdleTimeout, withTransientRetry } from './retry';
 
 function makeApiError(status: number): APIError {
     return APIError.generate(status, undefined, undefined, undefined);
@@ -185,5 +185,86 @@ describe('withTransientRetry', () => {
         await withTransientRetry(fn, { sleep, backoff });
         expect(backoff).toHaveBeenCalledWith(0, 500);
         expect(sleep).toHaveBeenCalledWith(10);
+    });
+});
+
+describe('withIdleTimeout', () => {
+    function neverYields(): AsyncIterable<string> {
+        return {
+            [Symbol.asyncIterator]() {
+                return {
+                    next(): Promise<IteratorResult<string>> {
+                        // Pending forever — simulates a hung upstream stream.
+                        return new Promise(() => { /* never resolves */ });
+                    },
+                };
+            },
+        };
+    }
+
+    async function asArray<T>(it: AsyncIterable<T>): Promise<T[]> {
+        const out: T[] = [];
+        for await (const v of it) out.push(v);
+        return out;
+    }
+
+    test('throws StreamIdleTimeoutError when no chunk arrives within the window', async () => {
+        // Drive the timer manually so the test is deterministic without
+        // pulling in fake timers (the never-resolving promise is the
+        // adversary here, not real time).
+        let scheduled: (() => void) | undefined;
+        const stream = withIdleTimeout(neverYields(), 50, {
+            setTimer: (cb) => { scheduled = cb; return 'h'; },
+            clearTimer: () => { scheduled = undefined; },
+        });
+        const iter = stream[Symbol.asyncIterator]();
+        const pending = iter.next();
+        // Fire the idle timer immediately.
+        scheduled?.();
+        await expect(pending).rejects.toBeInstanceOf(StreamIdleTimeoutError);
+    });
+
+    test('passes through values when the source yields before the timer fires', async () => {
+        async function* source() {
+            yield 'a';
+            yield 'b';
+            yield 'c';
+        }
+        // Real timer with a long window — values resolve immediately so the
+        // timer never fires.
+        expect(await asArray(withIdleTimeout(source(), 10_000))).toEqual(['a', 'b', 'c']);
+    });
+
+    test('returns the source unchanged when idleTimeoutMs is 0 (disabled)', async () => {
+        async function* source() { yield 'x'; }
+        const it = source();
+        expect(withIdleTimeout(it, 0)).toBe(it);
+    });
+
+    test('returns the source unchanged when idleTimeoutMs is negative', async () => {
+        async function* source() { yield 'x'; }
+        const it = source();
+        expect(withIdleTimeout(it, -1)).toBe(it);
+    });
+
+    test('classifies StreamIdleTimeoutError as transient so withTransientRetry retries it', () => {
+        expect(isTransientError(new StreamIdleTimeoutError(60_000))).toBe(true);
+    });
+
+    test('clears the timer on a successful chunk so a steady stream never trips it', async () => {
+        let scheduledCount = 0;
+        let clearedCount = 0;
+        async function* source() {
+            yield '1';
+            yield '2';
+        }
+        const stream = withIdleTimeout(source(), 100, {
+            setTimer: () => { scheduledCount++; return 'h'; },
+            clearTimer: () => { clearedCount++; },
+        });
+        expect(await asArray(stream)).toEqual(['1', '2']);
+        // One arm/disarm pair per next() call (including the final end-of-stream poll).
+        expect(scheduledCount).toBeGreaterThan(0);
+        expect(scheduledCount).toBe(clearedCount);
     });
 });

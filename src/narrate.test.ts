@@ -727,8 +727,6 @@ describe('narrateTreeDiff', () => {
             }],
         };
         const { options, cache } = makeOptions({ fetchTreeDiff: async () => tree });
-        // Per-file provider: emit a narrate-link only in the deleted file's section body.
-        // Summary section gets neutral prose so we can isolate the deleted-file behaviour.
         const provider: NarrationProvider = {
             async *stream(_systemPrompt: string, userPrompt: string) {
                 if (userPrompt.includes('Status: deleted')) {
@@ -744,12 +742,9 @@ describe('narrateTreeDiff', () => {
 
         const stored = await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo));
         expect(stored).toBeDefined();
-        // The deleted-file section's body must NOT contain a command URI
-        // pointing at the deleted path — that would open a non-existent file.
         expect(stored).not.toContain(deletedUri.toString());
         expect(stored).not.toContain('command:codeNarration.reveal');
         expect(stored).not.toContain('narrate://lines');
-        // The bracketed link text survives as plain text so the prose still reads naturally.
         expect(stored).toContain('some helper');
     });
 
@@ -771,6 +766,38 @@ describe('narrateTreeDiff', () => {
         const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
         const deletedSection = init.sections.find((s) => s.id === 'f0');
         expect(deletedSection?.linkUri).toBeUndefined();
+    });
+
+    test('aborts a hung provider stream after the configured idle timeout and surfaces a failure', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ h',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/h.ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ h',
+            }],
+        };
+        const { options, cache } = makeOptions({
+            fetchTreeDiff: async () => tree,
+            streamIdleTimeoutMs: 10,
+        });
+
+        const provider: NarrationProvider = {
+            async *stream() {
+                await new Promise<never>(() => { /* never resolves */ });
+                yield '';
+            },
+        };
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const failureChunks = events.filter(
+            (e) => e.kind === 'chunk' && /_\(failed:.*idle.*\)_/i.test(e.text),
+        );
+        expect(failureChunks.length).toBeGreaterThan(0);
+        expect(await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo))).toBeUndefined();
     });
 
     test('does not write the cache when any per-file section fails', async () => {

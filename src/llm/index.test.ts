@@ -11,7 +11,7 @@ const __resetConfig = vscodeMock.__resetConfig;
 
 describe('describeProvider', () => {
     test('reports anthropic provider with its model', () => {
-        expect(describeProvider({ kind: 'anthropic', apiKey: 'k', model: 'claude-sonnet-4-6' }))
+        expect(describeProvider({ kind: 'anthropic', apiKey: 'k', model: 'claude-sonnet-4-6', maxOutputTokens: 16384 }))
             .toEqual({ kind: 'anthropic', model: 'claude-sonnet-4-6' });
     });
 
@@ -62,7 +62,22 @@ describe('readProviderConfig', () => {
         __setConfig('provider', 'anthropic');
         __setConfig('anthropic.model', 'claude-opus-4-7');
         const cfg = await readProviderConfig(fakeContext('sk-test'));
-        expect(cfg).toEqual({ kind: 'anthropic', apiKey: 'sk-test', model: 'claude-opus-4-7' });
+        expect(cfg).toEqual({ kind: 'anthropic', apiKey: 'sk-test', model: 'claude-opus-4-7', maxOutputTokens: 16384 });
+    });
+
+    test('returns anthropic config with the configured maxOutputTokens override', async () => {
+        __setConfig('provider', 'anthropic');
+        __setConfig('anthropic.model', 'claude-opus-4-7');
+        __setConfig('anthropic.maxOutputTokens', 32000);
+        const cfg = await readProviderConfig(fakeContext('sk-test'));
+        expect(cfg).toEqual({ kind: 'anthropic', apiKey: 'sk-test', model: 'claude-opus-4-7', maxOutputTokens: 32000 });
+    });
+
+    test('falls back to the default maxOutputTokens when the setting is invalid', async () => {
+        __setConfig('provider', 'anthropic');
+        __setConfig('anthropic.maxOutputTokens', 0);
+        const cfg = await readProviderConfig(fakeContext('sk-test'));
+        expect(cfg).toMatchObject({ kind: 'anthropic', maxOutputTokens: 16384 });
     });
 
     test('throws MissingApiKeyError when provider=anthropic but no key is stored', async () => {

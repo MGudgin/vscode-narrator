@@ -20,7 +20,7 @@ import {
     fixupLinks,
     stripNarrateLinks,
 } from './prompt';
-import { withTransientRetry } from './retry';
+import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, withIdleTimeout, withTransientRetry } from './retry';
 import {
     DEFAULT_MAX_PROMPT_TOKENS,
     SubChunkRange,
@@ -40,6 +40,12 @@ function readSymbolConcurrency(): number {
 function readMaxPromptTokens(): number {
     const value = vscode.workspace.getConfiguration('codeNarration').get<number>('maxPromptTokens', DEFAULT_MAX_PROMPT_TOKENS);
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 1000) return DEFAULT_MAX_PROMPT_TOKENS;
+    return Math.floor(value);
+}
+
+function readStreamIdleTimeoutMs(): number {
+    const value = vscode.workspace.getConfiguration('codeNarration').get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
     return Math.floor(value);
 }
 
@@ -73,6 +79,12 @@ export interface NarrationOptions {
     // merged. Falls back to `codeNarration.maxPromptTokens` setting, then
     // `DEFAULT_MAX_PROMPT_TOKENS`.
     maxPromptTokens?: number;
+    // Idle-chunk timeout in milliseconds. If the provider stream emits no
+    // chunk for this long, the stream is aborted and the section either
+    // retries (transient) or surfaces an error. `0` disables the timeout.
+    // Falls back to `codeNarration.streamIdleTimeoutMs`, then
+    // `DEFAULT_STREAM_IDLE_TIMEOUT_MS`.
+    streamIdleTimeoutMs?: number;
 }
 
 export async function narrateDocument(
@@ -134,6 +146,7 @@ export async function narrateDiff(
             }
             sink({ kind: 'init', sections: [{ id: 'main' }] });
             const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
+            const idleTimeoutMs = options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs();
             const acc = await streamWholeFileOrChunked(
                 doc,
                 provider,
@@ -144,6 +157,7 @@ export async function narrateDiff(
                 (startLine, endLine) =>
                     buildDiffUserPromptForRange(doc, baseRef, diffResult.unifiedDiff, startLine, endLine),
                 maxPromptTokens,
+                idleTimeoutMs,
             );
             if (token.isCancellationRequested) return;
             sink({ kind: 'sectionDone', sectionId: 'main' });
@@ -250,7 +264,11 @@ export async function narrateTreeDiff(
                         sec.accumulated = '';
                         sink({ kind: 'sectionReset', sectionId: sec.id });
                     }
-                    for await (const chunk of provider.stream(systemPrompt, userPrompt, token)) {
+                    const stream = withIdleTimeout(
+                        provider.stream(systemPrompt, userPrompt, token),
+                        options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs(),
+                    );
+                    for await (const chunk of stream) {
                         if (token.isCancellationRequested) return;
                         sec.accumulated += chunk;
                         sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
@@ -348,6 +366,7 @@ async function narrateFileBody(
         }
         sink({ kind: 'init', sections: [...prefixSections, { id: 'main' }] });
         const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
+        const idleTimeoutMs = options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs();
         const acc = await streamWholeFileOrChunked(
             doc,
             provider,
@@ -357,6 +376,7 @@ async function narrateFileBody(
             buildUserPrompt(doc),
             (startLine, endLine) => buildUserPromptForRange(doc, startLine, endLine),
             maxPromptTokens,
+            idleTimeoutMs,
         );
         if (token.isCancellationRequested) return;
         sink({ kind: 'sectionDone', sectionId: 'main' });
@@ -366,6 +386,7 @@ async function narrateFileBody(
     }
 
     const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
+    const idleTimeoutMs = options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs();
     const sections: Section[] = units.map((unit, i) => {
         const clampedUnit = clampUnitToDoc(unit, doc);
         return {
@@ -411,7 +432,7 @@ async function narrateFileBody(
         if (token.isCancellationRequested) return;
         if (sec.cachedBody !== undefined) return;
         try {
-            await narrateSection(sec, doc, provider, token, sink, maxPromptTokens);
+            await narrateSection(sec, doc, provider, token, sink, maxPromptTokens, idleTimeoutMs);
         } catch (err) {
             if (token.isCancellationRequested) return;
             anyFailure = true;
@@ -471,10 +492,11 @@ async function narrateSection(
     token: vscode.CancellationToken,
     sink: NarrationSink,
     maxPromptTokens: number,
+    idleTimeoutMs: number,
 ): Promise<void> {
     const fullPrompt = buildSymbolUserPrompt(sec.unit, doc);
     if (!shouldSubChunk(fullPrompt, maxPromptTokens)) {
-        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt);
+        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt, idleTimeoutMs);
         return;
     }
 
@@ -489,14 +511,14 @@ async function narrateSection(
     // Defensive: if splitting failed to produce more than one chunk
     // (degenerate input), fall back to a single call rather than blocking.
     if (ranges.length <= 1) {
-        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt);
+        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt, idleTimeoutMs);
         return;
     }
 
     for (let i = 0; i < ranges.length; i++) {
         if (token.isCancellationRequested) return;
         const range = ranges[i];
-        await streamChunkIntoSection(sec, doc, provider, token, sink, range, i, ranges.length);
+        await streamChunkIntoSection(sec, doc, provider, token, sink, range, i, ranges.length, idleTimeoutMs);
     }
 }
 
@@ -515,6 +537,7 @@ async function streamChunkIntoSection(
     range: SubChunkRange,
     chunkIndex: number,
     chunkCount: number,
+    idleTimeoutMs: number,
 ): Promise<void> {
     const label = formatLineRangeLabel(range);
     // Spacing between chunks: leading double-newline for any chunk after
@@ -541,7 +564,11 @@ async function streamChunkIntoSection(
                 sink({ kind: 'sectionReset', sectionId: sec.id });
                 sink({ kind: 'chunk', sectionId: sec.id, text: sec.accumulated });
             }
-            for await (const chunk of provider.stream(SYMBOL_SYSTEM_PROMPT, userPrompt, token)) {
+            const stream = withIdleTimeout(
+                provider.stream(SYMBOL_SYSTEM_PROMPT, userPrompt, token),
+                idleTimeoutMs,
+            );
+            for await (const chunk of stream) {
                 if (token.isCancellationRequested) return;
                 sec.accumulated += chunk;
                 sink({ kind: 'chunk', sectionId: sec.id, text: chunk });
@@ -567,6 +594,7 @@ async function streamWholeFileOrChunked(
     fullPrompt: string,
     buildRangePrompt: (startLine: number, endLine: number) => string,
     maxPromptTokens: number,
+    idleTimeoutMs: number,
 ): Promise<string> {
     let acc = '';
     if (!shouldSubChunk(fullPrompt, maxPromptTokens)) {
@@ -576,7 +604,11 @@ async function streamWholeFileOrChunked(
                     acc = '';
                     sink({ kind: 'sectionReset', sectionId: 'main' });
                 }
-                for await (const chunk of provider.stream(systemPrompt, fullPrompt, token)) {
+                const stream = withIdleTimeout(
+                    provider.stream(systemPrompt, fullPrompt, token),
+                    idleTimeoutMs,
+                );
+                for await (const chunk of stream) {
                     if (token.isCancellationRequested) return;
                     acc += chunk;
                     sink({ kind: 'chunk', sectionId: 'main', text: chunk });
@@ -598,7 +630,11 @@ async function streamWholeFileOrChunked(
                     acc = '';
                     sink({ kind: 'sectionReset', sectionId: 'main' });
                 }
-                for await (const chunk of provider.stream(systemPrompt, fullPrompt, token)) {
+                const stream = withIdleTimeout(
+                    provider.stream(systemPrompt, fullPrompt, token),
+                    idleTimeoutMs,
+                );
+                for await (const chunk of stream) {
                     if (token.isCancellationRequested) return;
                     acc += chunk;
                     sink({ kind: 'chunk', sectionId: 'main', text: chunk });
@@ -627,7 +663,11 @@ async function streamWholeFileOrChunked(
                     sink({ kind: 'sectionReset', sectionId: 'main' });
                     sink({ kind: 'chunk', sectionId: 'main', text: acc });
                 }
-                for await (const chunk of provider.stream(systemPrompt, userPrompt, token)) {
+                const stream = withIdleTimeout(
+                    provider.stream(systemPrompt, userPrompt, token),
+                    idleTimeoutMs,
+                );
+                for await (const chunk of stream) {
                     if (token.isCancellationRequested) return;
                     acc += chunk;
                     sink({ kind: 'chunk', sectionId: 'main', text: chunk });
@@ -646,6 +686,7 @@ async function streamIntoSection(
     sink: NarrationSink,
     systemPrompt: string,
     userPrompt: string,
+    idleTimeoutMs: number,
 ): Promise<void> {
     await withTransientRetry(
         async (attempt) => {
@@ -653,7 +694,11 @@ async function streamIntoSection(
                 sec.accumulated = '';
                 sink({ kind: 'sectionReset', sectionId: sec.id });
             }
-            for await (const chunk of provider.stream(systemPrompt, userPrompt, token)) {
+            const stream = withIdleTimeout(
+                provider.stream(systemPrompt, userPrompt, token),
+                idleTimeoutMs,
+            );
+            for await (const chunk of stream) {
                 if (token.isCancellationRequested) return;
                 sec.accumulated += chunk;
                 sink({ kind: 'chunk', sectionId: sec.id, text: chunk });

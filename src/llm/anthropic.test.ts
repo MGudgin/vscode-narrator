@@ -12,21 +12,25 @@ interface StreamEvent {
 }
 
 let nextEvents: StreamEvent[] = [];
+let lastStreamArgs: Record<string, unknown> | undefined;
 
 vi.mock('@anthropic-ai/sdk', () => {
     class FakeAnthropic {
         messages = {
-            stream: () => ({
-                async *[Symbol.asyncIterator]() {
-                    for (const event of nextEvents) yield event;
-                },
-            }),
+            stream: (args: Record<string, unknown>) => {
+                lastStreamArgs = args;
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        for (const event of nextEvents) yield event;
+                    },
+                };
+            },
         };
     }
     return { default: FakeAnthropic };
 });
 
-import { AnthropicProvider, MAX_TOKENS_TRUNCATION_MARKER } from './anthropic';
+import { AnthropicProvider, DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS, MAX_TOKENS_TRUNCATION_MARKER } from './anthropic';
 
 function liveToken(): vscode.CancellationToken {
     return {
@@ -42,7 +46,7 @@ async function collect(provider: AnthropicProvider): Promise<string[]> {
 }
 
 describe('AnthropicProvider stream', () => {
-    beforeEach(() => { nextEvents = []; });
+    beforeEach(() => { nextEvents = []; lastStreamArgs = undefined; });
 
     test('yields text deltas in order', async () => {
         nextEvents = [
@@ -102,5 +106,39 @@ describe('AnthropicProvider stream', () => {
         ];
         const provider = new AnthropicProvider('sk-test', 'claude-sonnet-4-6');
         expect(await collect(provider)).toEqual(['visible']);
+    });
+
+    test('passes the configured maxOutputTokens to the SDK call', async () => {
+        nextEvents = [{ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null } }];
+        const provider = new AnthropicProvider('sk-test', 'claude-sonnet-4-6', 32000);
+        await collect(provider);
+        expect(lastStreamArgs?.max_tokens).toBe(32000);
+        expect(lastStreamArgs?.model).toBe('claude-sonnet-4-6');
+    });
+
+    test('defaults max_tokens to DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS when no override is given', async () => {
+        nextEvents = [{ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null } }];
+        const provider = new AnthropicProvider('sk-test', 'claude-sonnet-4-6');
+        await collect(provider);
+        expect(lastStreamArgs?.max_tokens).toBe(DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS);
+    });
+
+    test('ignores a non-positive maxOutputTokens override and falls back to the default', async () => {
+        nextEvents = [{ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null } }];
+        const provider = new AnthropicProvider('sk-test', 'claude-sonnet-4-6', 0);
+        await collect(provider);
+        expect(lastStreamArgs?.max_tokens).toBe(DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS);
+    });
+
+    test('configured maxOutputTokens still yields the truncation marker on stop_reason=max_tokens', async () => {
+        nextEvents = [
+            { type: 'content_block_delta', delta: { type: 'text_delta', text: 'big partial' } },
+            { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: null } },
+            { type: 'message_stop' },
+        ];
+        const provider = new AnthropicProvider('sk-test', 'claude-sonnet-4-6', 64000);
+        const chunks = await collect(provider);
+        expect(lastStreamArgs?.max_tokens).toBe(64000);
+        expect(chunks).toEqual(['big partial', MAX_TOKENS_TRUNCATION_MARKER]);
     });
 });

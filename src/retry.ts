@@ -8,6 +8,83 @@ import {
 
 export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_BASE_DELAY_MS = 500;
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+export class StreamIdleTimeoutError extends Error {
+    constructor(idleTimeoutMs: number) {
+        super(`Stream idle for more than ${idleTimeoutMs}ms; aborting.`);
+        this.name = 'StreamIdleTimeoutError';
+    }
+}
+
+export interface IdleTimeoutOptions {
+    setTimer?: (cb: () => void, ms: number) => unknown;
+    clearTimer?: (handle: unknown) => void;
+}
+
+/**
+ * Wrap an async iterable so it throws `StreamIdleTimeoutError` when no chunk
+ * arrives within `idleTimeoutMs`. Pass `0` (or any non-positive number) to
+ * disable the timeout. The timer is reset on every yielded chunk so a slow
+ * but steady stream completes normally; only true stalls trip the timeout.
+ */
+export function withIdleTimeout<T>(
+    source: AsyncIterable<T>,
+    idleTimeoutMs: number,
+    opts: IdleTimeoutOptions = {},
+): AsyncIterable<T> {
+    if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) return source;
+    const setTimer = opts.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
+    const clearTimer = opts.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+
+    return {
+        [Symbol.asyncIterator](): AsyncIterator<T> {
+            const iterator = source[Symbol.asyncIterator]();
+            let timer: unknown;
+            const armTimer = (reject: (err: unknown) => void) => {
+                timer = setTimer(() => reject(new StreamIdleTimeoutError(idleTimeoutMs)), idleTimeoutMs);
+            };
+            const disarmTimer = () => {
+                if (timer !== undefined) {
+                    clearTimer(timer);
+                    timer = undefined;
+                }
+            };
+            return {
+                async next(): Promise<IteratorResult<T>> {
+                    return new Promise<IteratorResult<T>>((resolve, reject) => {
+                        armTimer((err) => {
+                            // On timeout, attempt to close the underlying iterator so
+                            // upstream resources (HTTP sockets, etc.) are released.
+                            iterator.return?.().catch(() => { /* swallow */ });
+                            reject(err);
+                        });
+                        iterator.next().then(
+                            (result) => {
+                                disarmTimer();
+                                resolve(result);
+                            },
+                            (err) => {
+                                disarmTimer();
+                                reject(err);
+                            },
+                        );
+                    });
+                },
+                async return(value?: T): Promise<IteratorResult<T>> {
+                    disarmTimer();
+                    if (iterator.return) return iterator.return(value);
+                    return { value: value as T, done: true };
+                },
+                async throw(err?: unknown): Promise<IteratorResult<T>> {
+                    disarmTimer();
+                    if (iterator.throw) return iterator.throw(err);
+                    throw err;
+                },
+            };
+        },
+    };
+}
 
 const TRANSIENT_NODE_CODES = new Set([
     'ECONNRESET',
@@ -22,6 +99,7 @@ const TRANSIENT_NODE_CODES = new Set([
 export function isTransientError(err: unknown): boolean {
     if (err === null || err === undefined) return false;
 
+    if (err instanceof StreamIdleTimeoutError) return true;
     if (err instanceof APIUserAbortError) return false;
     if (err instanceof APIConnectionError) return true;
     if (err instanceof RateLimitError) return true;
