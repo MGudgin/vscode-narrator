@@ -21,6 +21,13 @@ export type ProviderFactory = (
     context: vscode.ExtensionContext,
 ) => Promise<{ provider: NarrationProvider; info: ProviderInfo }>;
 
+export type WebviewMessageTap = (message: unknown) => void;
+
+export type QuickPickResolver = <T extends vscode.QuickPickItem>(
+    items: readonly T[],
+    options: vscode.QuickPickOptions | undefined,
+) => Promise<T | undefined>;
+
 export interface ExtensionApi {
     /**
      * Override how the extension obtains a language model provider. Pass `undefined`
@@ -28,6 +35,21 @@ export interface ExtensionApi {
      * intended for integration tests that need to swap in a fake provider.
      */
     setProviderFactory(factory: ProviderFactory | undefined): void;
+    /**
+     * Register a callback invoked for every `webview.postMessage` payload the
+     * extension emits. Pass `undefined` to clear. No-op in production (off by
+     * default). Primarily intended for integration tests that need to observe
+     * extension-to-webview traffic without driving a real webview.
+     */
+    tapWebviewMessages(tap: WebviewMessageTap | undefined): void;
+    /**
+     * Override how the extension resolves its internal quick-picks (currently
+     * just the multi-repo picker in `openTreeDiff`). Pass `undefined` to
+     * restore the default behavior of calling `vscode.window.showQuickPick`.
+     * Primarily intended for integration tests that need a deterministic
+     * picker without driving the real UI.
+     */
+    setQuickPickResolver(resolver: QuickPickResolver | undefined): void;
 }
 
 const defaultProviderFactory: ProviderFactory = async (context) => {
@@ -36,6 +58,8 @@ const defaultProviderFactory: ProviderFactory = async (context) => {
 };
 
 let providerFactory: ProviderFactory = defaultProviderFactory;
+let webviewMessageTap: WebviewMessageTap | undefined;
+let quickPickResolver: QuickPickResolver | undefined;
 
 let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
@@ -105,7 +129,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         setProviderFactory(factory) {
             providerFactory = factory ?? defaultProviderFactory;
         },
+        tapWebviewMessages(tap) {
+            webviewMessageTap = tap;
+        },
+        setQuickPickResolver(resolver) {
+            quickPickResolver = resolver;
+        },
     };
+}
+
+function notifyWebviewTap(message: unknown): void {
+    if (!webviewMessageTap) return;
+    try {
+        webviewMessageTap(message);
+    } catch {
+        // Tap is a test-only seam; swallow throws so a misbehaving tap can't
+        // break production message flow.
+    }
+}
+
+function postToWebview(webview: vscode.Webview, message: unknown): void {
+    notifyWebviewTap(message);
+    void webview.postMessage(message);
 }
 
 function readSpeechConfig(): SpeechConfig {
@@ -131,13 +176,13 @@ function speechControl(command: 'play' | 'pause' | 'stop'): void {
         );
         return;
     }
-    void panel.webview.postMessage({ kind: 'speechControl', command });
+    postToWebview(panel.webview, { kind: 'speechControl', command });
 }
 
 function onSpeechConfigChange(): void {
     if (!panel) return;
     const speech = readSpeechConfig();
-    void panel.webview.postMessage({ kind: 'speechConfig', ...speech });
+    postToWebview(panel.webview, { kind: 'speechConfig', ...speech });
 }
 
 async function pickVoice(): Promise<void> {
@@ -229,10 +274,13 @@ async function pickRepoRoot(roots: vscode.Uri[]): Promise<vscode.Uri | undefined
         description: uri.fsPath,
         uri,
     }));
-    const picked = await vscode.window.showQuickPick(items, {
+    const options: vscode.QuickPickOptions = {
         placeHolder: 'Select a git repository to narrate',
         matchOnDescription: true,
-    });
+    };
+    const picked = quickPickResolver
+        ? await quickPickResolver(items, options)
+        : await vscode.window.showQuickPick(items, options);
     return picked?.uri;
 }
 
@@ -382,8 +430,14 @@ async function runNarration(
 
     void updateRepoWatcher(context, target);
 
+    const sinkWebview = panel.webview;
     const sink = buildNarrationSink({
-        webview: panel.webview,
+        webview: {
+            postMessage(message) {
+                notifyWebviewTap(message);
+                return sinkWebview.postMessage(message);
+            },
+        },
         token,
         target,
         bannerLabel,
@@ -443,7 +497,7 @@ function onSelectionChange(e: vscode.TextEditorSelectionChangeEvent): void {
     const matchedId = match.id;
     selectionDebounce = setTimeout(() => {
         if (!panel) return;
-        void panel.webview.postMessage({ kind: 'highlight', sectionId: matchedId });
+        postToWebview(panel.webview, { kind: 'highlight', sectionId: matchedId });
     }, SELECTION_DEBOUNCE_MS);
 }
 
