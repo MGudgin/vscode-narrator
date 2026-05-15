@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { NarrationUnit } from './symbols';
 import { TreeChange } from './diff';
+import { normalizeRoot, relPath } from './paths';
 
 const MAX_COMBINED_DIFF_CHARS = 12000;
 
@@ -123,13 +124,14 @@ export function buildTreeSummaryPrompt(
     combinedDiff: string,
 ): string {
     const repoName = (repoRoot.fsPath || repoRoot.path).split(/[\\/]/).filter(Boolean).pop() ?? '';
+    const normalizedRoot = normalizeRoot(repoRoot.fsPath || repoRoot.path);
     const list = changes
         .map((c) => {
-            const path = relativePath(repoRoot, c.uri);
+            const p = relPath(normalizedRoot, c.uri);
             if (c.status === 'renamed' && c.originalUri) {
-                return `- [renamed] ${relativePath(repoRoot, c.originalUri)} → ${path}`;
+                return `- [renamed] ${relPath(normalizedRoot, c.originalUri)} → ${p}`;
             }
-            return `- [${c.status}] ${path}`;
+            return `- [${c.status}] ${p}`;
         })
         .join('\n');
     const truncated = combinedDiff.length > MAX_COMBINED_DIFF_CHARS
@@ -143,13 +145,14 @@ export function buildTreeFileDiffPrompt(
     baseRef: string,
     change: TreeChange,
 ): string {
-    const path = relativePath(repoRoot, change.uri);
+    const normalizedRoot = normalizeRoot(repoRoot.fsPath || repoRoot.path);
+    const p = relPath(normalizedRoot, change.uri);
     const diffBody = change.unifiedDiff.trim().length > 0
         ? change.unifiedDiff
         : '(no diff body available)';
-    const lines = [`File: ${path}`];
+    const lines = [`File: ${p}`];
     if (change.status === 'renamed' && change.originalUri) {
-        lines.push(`Renamed from: ${relativePath(repoRoot, change.originalUri)}`);
+        lines.push(`Renamed from: ${relPath(normalizedRoot, change.originalUri)}`);
     }
     lines.push(`Status: ${change.status}`, `Diff base: ${baseRef}`);
     return `${lines.join('\n')}\n\nUnified diff:\n${diffBody}`;
@@ -192,15 +195,6 @@ export function buildSymbolUserPromptForRange(
     const chunkEnd = clampedEnd + 1;
     const chunkNote = `Chunk lines L${chunkStart}-L${chunkEnd} of full section L${totalStart}-L${totalEnd}. This is one sub-chunk of an oversized section; narrate only what is in this chunk.`;
     return `File: ${path}\nLanguage: ${doc.languageId}\n${baseHeader}\n${chunkNote}\n\nSource:\n${numbered}`;
-}
-
-function relativePath(root: vscode.Uri, file: vscode.Uri): string {
-    const rootPath = (root.fsPath || root.path).replace(/\\/g, '/').replace(/\/$/, '');
-    const filePath = (file.fsPath || file.path).replace(/\\/g, '/');
-    if (rootPath && filePath.toLowerCase().startsWith(rootPath.toLowerCase() + '/')) {
-        return filePath.slice(rootPath.length + 1);
-    }
-    return filePath;
 }
 
 function numberLines(text: string): string {

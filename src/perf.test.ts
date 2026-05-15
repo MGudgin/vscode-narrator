@@ -4,9 +4,9 @@
 // the ratio is closer to N^2 than N. Wall-clock measurements are logged but
 // not asserted on.
 
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { NarrationCache } from './cache';
+import { NarrationCache, sectionKey, sectionKeyFromHash, hashContent } from './cache';
 import {
     flattenSymbols,
     getFlattenSymbolsInternalAllocations,
@@ -21,6 +21,14 @@ import {
 } from './sink';
 import { NarrationTarget } from './target';
 import { findSectionForLine } from './extension';
+import {
+    narrateDocument,
+    NarrationEvent,
+    NarrationOptions,
+    NarrationSink,
+} from './narrate';
+import { NarrationUnit } from './symbols';
+import { NarrationProvider, ProviderInfo } from './llm/index';
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -353,7 +361,6 @@ describe('[perf] numberLinesInRange avoids per-line lineAt allocations', () => {
         const N = 10_000;
         const lines = Array.from({ length: N }, (_, i) => `const value${i} = ${i};`);
         const doc = makePerfDoc(lines);
-        // Warm-up.
         buildUserPromptForRange(doc, 0, N - 1);
         const elapsed = await measure('numberLinesInRange 10000 lines', () => {
             buildUserPromptForRange(doc, 0, N - 1);
@@ -468,5 +475,125 @@ describe('[perf] markdownToSpeech is faster after collapsing passes and hoisting
 
         expect(markdownToSpeech(md)).toBe(preFixMarkdownToSpeech(md));
         expect(speedup).toBeGreaterThan(1.15);
+    });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Issue #79: settings re-read from getConfiguration multiple times per
+// narration. After the fix, the narration entrypoint takes a single
+// snapshot of the relevant codeNarration settings keys and passes it down,
+// so a full narration of N sections should call getConfiguration AT MOST
+// once for the narration-level keys — not once per section.
+// ───────────────────────────────────────────────────────────────────────────
+describe('[perf] narration takes one config snapshot, not one per section', () => {
+    function mockDoc(text: string): vscode.TextDocument {
+        const lines = text.split('\n');
+        return {
+            uri: vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri,
+            languageId: 'typescript',
+            lineCount: lines.length,
+            getText: (range?: vscode.Range) => {
+                if (!range) return text;
+                return lines.slice(range.start.line, range.end.line + 1).join('\n');
+            },
+            lineAt: (line: number) => ({
+                text: lines[line] ?? '',
+                range: new vscode.Range(line, 0, line, (lines[line] ?? '').length),
+            }),
+        } as unknown as vscode.TextDocument;
+    }
+    function liveToken(): vscode.CancellationToken {
+        return {
+            isCancellationRequested: false,
+            onCancellationRequested: () => ({ dispose: () => {} }),
+        } as unknown as vscode.CancellationToken;
+    }
+    function chunkProvider(chunks: string[]): NarrationProvider {
+        return {
+            async *stream() {
+                for (const c of chunks) yield c;
+            },
+        };
+    }
+
+    test('a 20-section narration calls getConfiguration at most once per settings key', async () => {
+        const spy = vi.spyOn(vscode.workspace, 'getConfiguration');
+        try {
+            const units: NarrationUnit[] = Array.from({ length: 20 }, (_, i) => ({
+                kind: 'symbol' as const,
+                name: `s${i}`,
+                range: new vscode.Range(i, 0, i, 6),
+            }));
+            const text = Array.from({ length: 20 }, (_, i) => `line${i}`).join('\n');
+            const doc = mockDoc(text);
+            const cache = new NarrationCache(new MemoryMemento());
+            const options: NarrationOptions = {
+                skipCache: false,
+                cache,
+                providerInfo: { kind: 'test', model: 'm1' } as ProviderInfo,
+                fetchUnits: async () => units,
+                concurrency: 4,
+            };
+            const events: NarrationEvent[] = [];
+            const sink: NarrationSink = (e) => events.push(e);
+            await narrateDocument(doc, chunkProvider(['ok.']), liveToken(), sink, options);
+
+            expect(spy.mock.calls.length).toBeLessThanOrEqual(2);
+            // eslint-disable-next-line no-console
+            console.log(`[perf] getConfiguration calls for 20-section narration: ${spy.mock.calls.length}`);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Issue #80: sectionKey hashes the whole unit text per section. After the
+// fix, the unit text is hashed once via hashContent() and the digest is
+// fed into sectionKeyFromHash for every cache-key build — so creating N
+// keys for the same unit takes time linear in the digest length, not in
+// the body length.
+// ───────────────────────────────────────────────────────────────────────────
+describe('[perf] sectionKey body hashing happens once per unique unit', () => {
+    test('sectionKey(body) and sectionKeyFromHash(hashContent(body)) produce the same digest', () => {
+        const uri = vscode.Uri.parse('file:///foo.ts') as unknown as vscode.Uri;
+        const provider = { kind: 'anthropic', model: 'sonnet' };
+        const body = 'x'.repeat(5000);
+        const fromHashFlow = sectionKeyFromHash(uri, 'foo', hashContent(body), 50000, provider);
+        const fromOldFlow = sectionKey(uri, 'foo', body, 50000, provider);
+        expect(fromHashFlow).toBe(fromOldFlow);
+    });
+
+    test('precomputed-hash flow is much faster than re-hashing the body each call for a large unit', () => {
+        const uri = vscode.Uri.parse('file:///foo.ts') as unknown as vscode.Uri;
+        const provider = { kind: 'anthropic', model: 'sonnet' };
+        const body = 'y'.repeat(200_000);
+        const N = 200;
+
+        const oldStart = performance.now();
+        for (let i = 0; i < N; i++) {
+            sectionKey(uri, 'foo', body, 50000, provider);
+        }
+        const oldElapsed = performance.now() - oldStart;
+
+        const newStart = performance.now();
+        const unitHash = hashContent(body);
+        for (let i = 0; i < N; i++) {
+            sectionKeyFromHash(uri, 'foo', unitHash, 50000, provider);
+        }
+        const newElapsed = performance.now() - newStart;
+
+        // eslint-disable-next-line no-console
+        console.log(`[perf] sectionKey body-hash dedup: ${N} keys old=${oldElapsed.toFixed(2)}ms vs new=${newElapsed.toFixed(2)}ms`);
+        expect(newElapsed).toBeLessThan(oldElapsed / 4);
+    });
+
+    test('section-key snapshot is stable: pinning the digest for fixed inputs', () => {
+        const uri = vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri;
+        const provider = { kind: 'anthropic', model: 'claude-sonnet-4-6' };
+        const body = 'body';
+        const expected = sectionKey(uri, 'foo', body, 50000, provider);
+        expect(sectionKeyFromHash(uri, 'foo', hashContent(body), 50000, provider)).toBe(expected);
+        expect(expected).toMatch(/^[a-f0-9]{64}$/);
     });
 });

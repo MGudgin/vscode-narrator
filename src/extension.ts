@@ -10,7 +10,7 @@ import {
     NarrationProvider,
     ProviderInfo,
 } from './llm/index';
-import { narrateDocument, narrateDiff, narrateTreeDiff } from './narrate';
+import { narrateDocument, narrateDiff, narrateTreeDiff, readNarrationConfigSnapshot } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri, shouldFollowEditor } from './target';
 import { NarrationCache } from './cache';
@@ -55,6 +55,23 @@ const SELECTION_DEBOUNCE_MS = 200;
 const REPO_STATE_DEBOUNCE_MS = 750;
 const ACTIVE_EDITOR_DEBOUNCE_MS = 250;
 
+let cachedNarrateOnSave: boolean | undefined;
+
+function readNarrateOnSave(): boolean {
+    if (cachedNarrateOnSave === undefined) {
+        cachedNarrateOnSave = vscode.workspace
+            .getConfiguration('codeNarration')
+            .get<boolean>('narrateOnSave', true);
+    }
+    return cachedNarrateOnSave;
+}
+
+function refreshNarrateOnSaveCache(): void {
+    cachedNarrateOnSave = vscode.workspace
+        .getConfiguration('codeNarration')
+        .get<boolean>('narrateOnSave', true);
+}
+
 interface RunOptions {
     skipCache?: boolean;
 }
@@ -81,6 +98,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.window.onDidChangeActiveTextEditor((editor) => onActiveEditorChange(context, editor)),
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('codeNarration.speech')) onSpeechConfigChange();
+            if (e.affectsConfiguration('codeNarration.narrateOnSave')) refreshNarrateOnSaveCache();
         }),
     );
     return {
@@ -152,6 +170,7 @@ export function deactivate(): void {
     repoWatcher = undefined;
     watchedRepoRoot = undefined;
     repoWatcherPrimed = false;
+    cachedNarrateOnSave = undefined;
 }
 
 async function openFileNarration(context: vscode.ExtensionContext): Promise<void> {
@@ -377,6 +396,7 @@ async function runNarration(
             skipCache: opts.skipCache ?? false,
             cache,
             providerInfo,
+            configSnapshot: readNarrationConfigSnapshot(),
         };
 
         if (target.kind === 'tree') {
@@ -467,8 +487,7 @@ export function findSectionForLine<T extends SectionRangeLike>(
 function onSave(context: vscode.ExtensionContext, doc: vscode.TextDocument): void {
     if (!panel || !currentTarget) return;
     if (!targetMatchesSavedDoc(currentTarget, doc.uri)) return;
-    const enabled = vscode.workspace.getConfiguration('codeNarration').get<boolean>('narrateOnSave', true);
-    if (!enabled) return;
+    if (!readNarrateOnSave()) return;
     if (saveDebounce) clearTimeout(saveDebounce);
     const target = currentTarget;
     saveDebounce = setTimeout(() => void runNarration(context, target), SAVE_DEBOUNCE_MS);

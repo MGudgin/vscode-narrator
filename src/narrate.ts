@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit, getNarrationUnits } from './symbols';
 import { DiffResult, TreeChange, TreeDiffResult, getDiff, getTreeDiff } from './diff';
-import { NarrationCache, fileKey, sectionKey, diffKey, treeDiffKey } from './cache';
+import { NarrationCache, fileKey, sectionKeyFromHash, hashContent, diffKey, treeDiffKey } from './cache';
 import {
     MapWithConcurrencyError,
     MapWithConcurrencyResult,
@@ -34,25 +34,38 @@ import {
     shouldSubChunk,
     splitLineRange,
 } from './chunking';
+import { normalizeRoot, relPath } from './paths';
 
 const DEFAULT_SYMBOL_CONCURRENCY = 4;
 
-function readSymbolConcurrency(): number {
-    const value = vscode.workspace.getConfiguration('codeNarration').get<number>('symbolConcurrency', DEFAULT_SYMBOL_CONCURRENCY);
+export interface NarrationConfigSnapshot {
+    symbolConcurrency: number;
+    maxPromptTokens: number;
+    streamIdleTimeoutMs: number;
+}
+
+function clampSymbolConcurrency(value: unknown): number {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return DEFAULT_SYMBOL_CONCURRENCY;
     return Math.min(16, Math.floor(value));
 }
 
-function readMaxPromptTokens(): number {
-    const value = vscode.workspace.getConfiguration('codeNarration').get<number>('maxPromptTokens', DEFAULT_MAX_PROMPT_TOKENS);
+function clampMaxPromptTokens(value: unknown): number {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 1000) return DEFAULT_MAX_PROMPT_TOKENS;
     return Math.floor(value);
 }
 
-function readStreamIdleTimeoutMs(): number {
-    const value = vscode.workspace.getConfiguration('codeNarration').get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+function clampStreamIdleTimeoutMs(value: unknown): number {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
     return Math.floor(value);
+}
+
+export function readNarrationConfigSnapshot(): NarrationConfigSnapshot {
+    const cfg = vscode.workspace.getConfiguration('codeNarration');
+    return {
+        symbolConcurrency: clampSymbolConcurrency(cfg.get<number>('symbolConcurrency', DEFAULT_SYMBOL_CONCURRENCY)),
+        maxPromptTokens: clampMaxPromptTokens(cfg.get<number>('maxPromptTokens', DEFAULT_MAX_PROMPT_TOKENS)),
+        streamIdleTimeoutMs: clampStreamIdleTimeoutMs(cfg.get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS)),
+    };
 }
 
 export interface SectionInit {
@@ -80,17 +93,26 @@ export interface NarrationOptions {
     fetchDiff?: (uri: vscode.Uri, baseRef: string) => Promise<DiffResult>;
     fetchTreeDiff?: (repoRoot: vscode.Uri, baseRef: string) => Promise<TreeDiffResult>;
     concurrency?: number;
-    // Token budget for a single prompt body. When a unit's prompt would
-    // exceed this, it is sub-chunked and the per-chunk narrations are
-    // merged. Falls back to `codeNarration.maxPromptTokens` setting, then
-    // `DEFAULT_MAX_PROMPT_TOKENS`.
     maxPromptTokens?: number;
-    // Idle-chunk timeout in milliseconds. If the provider stream emits no
-    // chunk for this long, the stream is aborted and the section either
-    // retries (transient) or surfaces an error. `0` disables the timeout.
-    // Falls back to `codeNarration.streamIdleTimeoutMs`, then
-    // `DEFAULT_STREAM_IDLE_TIMEOUT_MS`.
     streamIdleTimeoutMs?: number;
+    configSnapshot?: NarrationConfigSnapshot;
+}
+
+function configFrom(options: NarrationOptions): NarrationConfigSnapshot {
+    if (options.configSnapshot) return options.configSnapshot;
+    return readNarrationConfigSnapshot();
+}
+
+function resolveMaxPromptTokens(options: NarrationOptions, snapshot: NarrationConfigSnapshot): number {
+    return options.maxPromptTokens ?? snapshot.maxPromptTokens;
+}
+
+function resolveIdleTimeoutMs(options: NarrationOptions, snapshot: NarrationConfigSnapshot): number {
+    return options.streamIdleTimeoutMs ?? snapshot.streamIdleTimeoutMs;
+}
+
+function resolveConcurrency(options: NarrationOptions, snapshot: NarrationConfigSnapshot): number {
+    return options.concurrency ?? snapshot.symbolConcurrency;
 }
 
 export async function narrateDocument(
@@ -100,7 +122,8 @@ export async function narrateDocument(
     sink: NarrationSink,
     options: NarrationOptions,
 ): Promise<void> {
-    return narrateFileBody(doc, provider, token, sink, options, []);
+    const snapshot = configFrom(options);
+    return narrateFileBody(doc, provider, token, sink, { ...options, configSnapshot: snapshot }, []);
 }
 
 export async function narrateDiff(
@@ -111,6 +134,8 @@ export async function narrateDiff(
     sink: NarrationSink,
     options: NarrationOptions,
 ): Promise<void> {
+    const snapshot = configFrom(options);
+    options = { ...options, configSnapshot: snapshot };
     const fetchDiff = options.fetchDiff ?? getDiff;
     const diffResult = await fetchDiff(doc.uri, baseRef);
     if (token.isCancellationRequested) return;
@@ -151,8 +176,8 @@ export async function narrateDiff(
                 }
             }
             sink({ kind: 'init', sections: [{ id: 'main' }] });
-            const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
-            const idleTimeoutMs = options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs();
+            const maxPromptTokens = resolveMaxPromptTokens(options, snapshot);
+            const idleTimeoutMs = resolveIdleTimeoutMs(options, snapshot);
             const acc = await streamWholeFileOrChunked(
                 doc,
                 provider,
@@ -182,6 +207,8 @@ export async function narrateTreeDiff(
     sink: NarrationSink,
     options: NarrationOptions,
 ): Promise<void> {
+    const snapshot = configFrom(options);
+    options = { ...options, configSnapshot: snapshot };
     const fetchTreeDiff = options.fetchTreeDiff ?? getTreeDiff;
     const treeResult = await fetchTreeDiff(repoRoot, baseRef);
     if (token.isCancellationRequested) return;
@@ -232,10 +259,11 @@ export async function narrateTreeDiff(
         accumulated: '',
     };
 
+    const normalizedRepoRoot = normalizeRoot(repoRoot.fsPath || repoRoot.path);
     const fileSections: TreeSection[] = changes.map((change, i) => ({
         id: `f${i}`,
         kind: 'file',
-        headingMarkdown: buildTreeFileHeading(repoRoot, change),
+        headingMarkdown: buildTreeFileHeading(normalizedRepoRoot, change),
         linkUri: change.status === 'deleted' ? undefined : change.uri,
         change,
         accumulated: '',
@@ -253,6 +281,7 @@ export async function narrateTreeDiff(
     });
 
     const concurrency = options.concurrency ?? 4;
+    const idleTimeoutMs = resolveIdleTimeoutMs(options, snapshot);
     let anyFailure = false;
 
     const { errors: treeErrors } = await mapWithConcurrency(allSections, concurrency, async (sec) => {
@@ -272,7 +301,7 @@ export async function narrateTreeDiff(
                     }
                     const stream = withIdleTimeout(
                         provider.stream(systemPrompt, userPrompt, token),
-                        options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs(),
+                        idleTimeoutMs,
                     );
                     for await (const chunk of stream) {
                         if (token.isCancellationRequested) return;
@@ -312,12 +341,12 @@ export async function narrateTreeDiff(
     sink({ kind: 'done' });
 }
 
-function buildTreeFileHeading(repoRoot: vscode.Uri, change: TreeChange): string {
-    const safeRel = escapeMarkdownPath(relPathForHeading(repoRoot, change.uri));
+function buildTreeFileHeading(normalizedRoot: string, change: TreeChange): string {
+    const safeRel = escapeMarkdownPath(relPath(normalizedRoot, change.uri));
     const tag = change.status === 'modified' ? '' : ` _(${change.status})_`;
     let label: string;
     if (change.status === 'renamed' && change.originalUri) {
-        const safeOld = escapeMarkdownPath(relPathForHeading(repoRoot, change.originalUri));
+        const safeOld = escapeMarkdownPath(relPath(normalizedRoot, change.originalUri));
         label = `\`${safeOld}\` → \`${safeRel}\``;
     } else {
         label = `\`${safeRel}\``;
@@ -328,14 +357,6 @@ function buildTreeFileHeading(repoRoot: vscode.Uri, change: TreeChange): string 
     const range = { start: { line: 0, character: 0 }, end: { line: 0, character: Number.MAX_SAFE_INTEGER } };
     const args = encodeURIComponent(JSON.stringify([change.uri.toString(), range]));
     return `## [${label}](command:codeNarration.reveal?${args})${tag}`;
-}
-
-function relPathForHeading(repoRoot: vscode.Uri, file: vscode.Uri): string {
-    const rootPath = (repoRoot.fsPath || repoRoot.path).replace(/\\/g, '/').replace(/\/$/, '');
-    const filePath = (file.fsPath || file.path).replace(/\\/g, '/');
-    return rootPath && filePath.toLowerCase().startsWith(rootPath.toLowerCase() + '/')
-        ? filePath.slice(rootPath.length + 1)
-        : filePath;
 }
 
 function escapeMarkdownPath(path: string): string {
@@ -350,6 +371,8 @@ async function narrateFileBody(
     options: NarrationOptions,
     prefixSections: SectionInit[],
 ): Promise<void> {
+    const snapshot = configFrom(options);
+    options = { ...options, configSnapshot: snapshot };
     const fetchUnits = options.fetchUnits ?? getNarrationUnits;
     const units = await fetchUnits(doc);
     if (token.isCancellationRequested) return;
@@ -371,8 +394,8 @@ async function narrateFileBody(
             }
         }
         sink({ kind: 'init', sections: [...prefixSections, { id: 'main' }] });
-        const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
-        const idleTimeoutMs = options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs();
+        const maxPromptTokens = resolveMaxPromptTokens(options, snapshot);
+        const idleTimeoutMs = resolveIdleTimeoutMs(options, snapshot);
         const acc = await streamWholeFileOrChunked(
             doc,
             provider,
@@ -391,19 +414,20 @@ async function narrateFileBody(
         return;
     }
 
-    const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
-    const idleTimeoutMs = options.streamIdleTimeoutMs ?? readStreamIdleTimeoutMs();
+    const maxPromptTokens = resolveMaxPromptTokens(options, snapshot);
+    const idleTimeoutMs = resolveIdleTimeoutMs(options, snapshot);
     const sections: Section[] = units.map((unit, i) => {
         const clampedUnit = clampUnitToDoc(unit, doc);
+        const unitTextHash = hashContent(doc.getText(clampedUnit.range));
         return {
             id: `s${i}`,
             unit: clampedUnit,
             headingMarkdown: buildHeading(doc.uri, clampedUnit, clampedUnit.name),
             accumulated: '',
-            cacheKey: sectionKey(
+            cacheKey: sectionKeyFromHash(
                 doc.uri,
                 clampedUnit.name,
-                doc.getText(clampedUnit.range),
+                unitTextHash,
                 maxPromptTokens,
                 options.providerInfo,
             ),
@@ -433,7 +457,7 @@ async function narrateFileBody(
         fromCache: allCached || undefined,
     });
 
-    const concurrency = options.concurrency ?? readSymbolConcurrency();
+    const concurrency = resolveConcurrency(options, snapshot);
     let anyFailure = false;
     const { errors } = await mapWithConcurrency(sections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;

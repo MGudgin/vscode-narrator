@@ -1,5 +1,5 @@
-import * as path from 'path';
 import * as vscode from 'vscode';
+import { normalizeRoot } from './paths';
 
 export type NarrationTarget =
     | { kind: 'file'; uri: vscode.Uri }
@@ -88,24 +88,9 @@ function shortName(uri: vscode.Uri): string {
 }
 
 function isUriUnder(root: vscode.Uri, candidate: vscode.Uri): boolean {
-    const rootPath = normalize(root.fsPath || root.path);
-    const candPath = normalize(candidate.fsPath || candidate.path);
+    const rootPath = normalizeRoot(root.fsPath || root.path);
+    const candPath = normalizeRoot(candidate.fsPath || candidate.path);
     if (rootPath.length === 0) return false;
     if (candPath === rootPath) return true;
     return candPath.startsWith(rootPath + '/');
-}
-
-function normalize(p: string): string {
-    // Lower-case the drive letter on Windows so e.g. "C:/foo" and "c:/foo"
-    // match. Forward-slashes only; no trailing slash. `..`/`.` segments are
-    // collapsed via `path.posix.normalize` *before* the prefix comparison in
-    // `isUriUnder` runs — without this collapse, a URI of the form
-    // `<repoRoot>/../<elsewhere>` passes the startsWith check, and VS Code's
-    // filesystem APIs would then resolve the traversal when actually opening
-    // the file. (Bypass for #70 closed in #89.)
-    let out = p.replace(/\\/g, '/');
-    out = path.posix.normalize(out);
-    if (out.endsWith('/')) out = out.slice(0, -1);
-    if (/^[A-Za-z]:\//.test(out)) out = out[0].toLowerCase() + out.slice(1);
-    return out;
 }
