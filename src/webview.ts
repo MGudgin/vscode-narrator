@@ -33,6 +33,7 @@ export function isAllowedLinkUrl(url: string): boolean {
     if (/^https?:/i.test(url)) return true;
     if (/^mailto:/i.test(url)) return true;
     if (/^command:codeNarration\.reveal\?/i.test(url)) return true;
+    if (/^command:codeNarration\.refresh(?:$|\?)/i.test(url)) return true;
     return false;
 }
 

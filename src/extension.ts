@@ -264,7 +264,7 @@ function ensurePanel(context: vscode.ExtensionContext): void {
             // `command:` URIs are restricted to the single reveal handler the
             // extension actually emits. Paired with the link allowlist in
             // `isAllowedLinkUrl` and the URI validation in `revealLocation`.
-            enableCommandUris: ['codeNarration.reveal'],
+            enableCommandUris: ['codeNarration.reveal', 'codeNarration.refresh'],
             enableScripts: true,
             retainContextWhenHidden: true,
         },
