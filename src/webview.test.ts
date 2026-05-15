@@ -142,6 +142,12 @@ describe('isAllowedLinkUrl', () => {
         ).toBe(true);
     });
 
+    test('permits the codeNarration.refresh command URI', () => {
+        expect(isAllowedLinkUrl('command:codeNarration.refresh')).toBe(true);
+        expect(isAllowedLinkUrl('COMMAND:codeNarration.refresh')).toBe(true);
+        expect(isAllowedLinkUrl('command:codeNarration.refresh?%5B%5D')).toBe(true);
+    });
+
     test('rejects any other command: URI', () => {
         expect(isAllowedLinkUrl('command:workbench.action.openSettings')).toBe(false);
         expect(isAllowedLinkUrl('command:workbench.action.terminal.sendSequence?%7B%7D')).toBe(false);
@@ -150,6 +156,9 @@ describe('isAllowedLinkUrl', () => {
         // Reveal without an args payload (no `?`) is also rejected — the real
         // command always carries encoded args, so the bare form is suspicious.
         expect(isAllowedLinkUrl('command:codeNarration.reveal')).toBe(false);
+        // Other codeNarration.* commands must NOT be confused with refresh.
+        expect(isAllowedLinkUrl('command:codeNarration.somethingElse')).toBe(false);
+        expect(isAllowedLinkUrl('command:codeNarration.refreshOther')).toBe(false);
     });
 
     test('rejects file: URIs (clickable info disclosure)', () => {
