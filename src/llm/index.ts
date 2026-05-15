@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { VSCodeLmProvider } from './vscodeLm';
-import { AnthropicProvider } from './anthropic';
+import { AnthropicProvider, DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './anthropic';
 
 export interface NarrationProvider {
     stream(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): AsyncIterable<string>;
@@ -20,7 +20,7 @@ export class MissingApiKeyError extends Error {
 
 export type ProviderConfig =
     | { kind: 'vscodeLm'; modelFamily?: string }
-    | { kind: 'anthropic'; apiKey: string; model: string };
+    | { kind: 'anthropic'; apiKey: string; model: string; maxOutputTokens: number };
 
 const ANTHROPIC_KEY_SECRET = 'codeNarration.anthropicApiKey';
 
@@ -32,7 +32,11 @@ export async function readProviderConfig(context: vscode.ExtensionContext): Prom
         const apiKey = await context.secrets.get(ANTHROPIC_KEY_SECRET);
         if (!apiKey) throw new MissingApiKeyError();
         const model = config.get<string>('anthropic.model', 'claude-sonnet-4-6');
-        return { kind: 'anthropic', apiKey, model };
+        const rawMax = config.get<number>('anthropic.maxOutputTokens', DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS);
+        const maxOutputTokens = typeof rawMax === 'number' && Number.isFinite(rawMax) && rawMax > 0
+            ? Math.floor(rawMax)
+            : DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS;
+        return { kind: 'anthropic', apiKey, model, maxOutputTokens };
     }
 
     const family = config.get<string>('vscodeLm.modelFamily', '');
@@ -40,7 +44,7 @@ export async function readProviderConfig(context: vscode.ExtensionContext): Prom
 }
 
 export function makeProvider(config: ProviderConfig): NarrationProvider {
-    if (config.kind === 'anthropic') return new AnthropicProvider(config.apiKey, config.model);
+    if (config.kind === 'anthropic') return new AnthropicProvider(config.apiKey, config.model, config.maxOutputTokens);
     return new VSCodeLmProvider(config.modelFamily);
 }
 

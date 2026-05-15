@@ -142,6 +142,12 @@
           "default": "claude-sonnet-4-6",
           "description": "Anthropic model ID. Examples: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5-20251001."
         },
+        "codeNarration.anthropic.maxOutputTokens": {
+          "type": "integer",
+          "default": 16384,
+          "minimum": 1,
+          "description": "Maximum output tokens the Anthropic model may emit for a single narration request. Raise this when long symbols or diffs are getting silently cut off (a truncation marker will appear in the section); lower it to cap spend. Should not exceed the selected model's documented max_tokens (Sonnet 4.6: 64k, Opus 4.7: 32k, Haiku 4.5: 8k)."
+        },
         "codeNarration.diffBase": {
           "type": "string",
           "default": "HEAD",
@@ -185,6 +191,12 @@
           "default": 50000,
           "minimum": 1000,
           "description": "Token budget for a single LLM prompt body. When a symbol's prompt would exceed this, the symbol is split into overlapping line-range sub-chunks, each narrated independently, and the results are merged. Lower this for cheaper calls or to fit smaller context windows; raise it if your model has plenty of context and you want fewer cuts."
+        },
+        "codeNarration.streamIdleTimeoutMs": {
+          "type": "integer",
+          "default": 60000,
+          "minimum": 0,
+          "description": "Maximum number of milliseconds the language-model stream may go without emitting a chunk before the request is aborted and (where applicable) retried. Guards against hung proxies and stalled SSE connections that would otherwise leave a section pulsing forever. Set to 0 to disable the timeout."
         },
         "codeNarration.speech.enabled": {
           "type": "boolean",

@@ -10,11 +10,19 @@ import { NarrationProvider } from './index';
  */
 export const MAX_TOKENS_TRUNCATION_MARKER = '\n\n_(truncated — output exceeded max_tokens)_';
 
+export const DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS = 16384;
+
 export class AnthropicProvider implements NarrationProvider {
     private readonly client: Anthropic;
+    private readonly maxOutputTokens: number;
 
-    constructor(apiKey: string, private readonly model: string) {
+    constructor(apiKey: string, private readonly model: string, maxOutputTokens?: number) {
         this.client = new Anthropic({ apiKey });
+        this.maxOutputTokens = typeof maxOutputTokens === 'number'
+            && Number.isFinite(maxOutputTokens)
+            && maxOutputTokens > 0
+            ? Math.floor(maxOutputTokens)
+            : DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS;
     }
 
     async *stream(systemPrompt: string, userPrompt: string, token: vscode.CancellationToken): AsyncGenerator<string> {
@@ -24,7 +32,7 @@ export class AnthropicProvider implements NarrationProvider {
             const stream = this.client.messages.stream(
                 {
                     model: this.model,
-                    max_tokens: 8192,
+                    max_tokens: this.maxOutputTokens,
                     system: [
                         {
                             type: 'text',
