@@ -2,6 +2,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import * as vscode from 'vscode';
 import { NarrationProvider } from './index';
 
+/**
+ * Marker appended to a section's narration when Anthropic reports that the
+ * response was cut off because it hit the `max_tokens` budget. Surfaced as
+ * markdown italic on its own line so the user can tell the section is
+ * incomplete instead of treating the truncated output as the full answer.
+ */
+export const MAX_TOKENS_TRUNCATION_MARKER = '\n\n_(truncated — output exceeded max_tokens)_';
+
 export class AnthropicProvider implements NarrationProvider {
     private readonly client: Anthropic;
 
@@ -28,10 +36,21 @@ export class AnthropicProvider implements NarrationProvider {
                 },
                 { signal: abortController.signal },
             );
+            let truncated = false;
             for await (const event of stream) {
                 if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
                     yield event.delta.text;
+                } else if (event.type === 'message_delta' && event.delta.stop_reason === 'max_tokens') {
+                    // The model hit the max_tokens cap. Remember it and surface a
+                    // marker after the stream drains so partial sections are
+                    // distinguishable from naturally-completed ones. Other stop
+                    // reasons (end_turn, stop_sequence, tool_use) are not
+                    // truncations and need no marker.
+                    truncated = true;
                 }
+            }
+            if (truncated) {
+                yield MAX_TOKENS_TRUNCATION_MARKER;
             }
         } finally {
             sub.dispose();
