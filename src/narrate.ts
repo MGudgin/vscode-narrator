@@ -360,7 +360,7 @@ function buildTreeFileHeading(normalizedRoot: string, change: TreeChange): strin
 }
 
 function escapeMarkdownPath(path: string): string {
-    return path.replace(/[\[\]]/g, '\\$&');
+    return path.replace(/[\[\]`]/g, '\\$&');
 }
 
 async function narrateFileBody(

@@ -715,6 +715,93 @@ describe('narrateTreeDiff', () => {
         expect(summaryPromptCall?.userPrompt).toContain('[renamed] src/old.ts → src/new.ts');
     });
 
+    test('heading escapes backticks in file paths so the code span stays closed', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ b',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/src/weird`name.ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ b',
+            }],
+        };
+        const { options } = makeOptions({ fetchTreeDiff: async () => tree });
+        const provider = chunkProvider(['body.']);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const fileSection = init.sections.find((s) => s.id === 'f0');
+        expect(fileSection?.headingMarkdown).toContain('`src/weird\\`name.ts`');
+        expect(fileSection?.headingMarkdown).not.toMatch(/`src\/weird`name\.ts`/);
+    });
+
+    test('heading escapes backticks and square brackets together in a single path', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ b',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/src/[weird`].ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ b',
+            }],
+        };
+        const { options } = makeOptions({ fetchTreeDiff: async () => tree });
+        const provider = chunkProvider(['body.']);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const fileSection = init.sections.find((s) => s.id === 'f0');
+        expect(fileSection?.headingMarkdown).toContain('`src/\\[weird\\`\\].ts`');
+    });
+
+    test('renamed heading escapes special chars in BOTH original and new paths', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ r',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/src/[new].ts') as unknown as vscode.Uri,
+                originalUri: vscode.Uri.parse('file:///foo/repo/src/old`name.ts') as unknown as vscode.Uri,
+                status: 'renamed',
+                unifiedDiff: '@@ r',
+            }],
+        };
+        const { options } = makeOptions({ fetchTreeDiff: async () => tree });
+        const provider = chunkProvider(['body.']);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const fileSection = init.sections.find((s) => s.id === 'f0');
+        expect(fileSection?.headingMarkdown).toContain('`src/old\\`name.ts` → `src/\\[new\\].ts`');
+    });
+
+    test('heading leaves a plain path with no special characters unchanged', async () => {
+        const tree: TreeDiffResult = {
+            kind: 'modified',
+            combinedDiff: '@@ p',
+            changes: [{
+                uri: vscode.Uri.parse('file:///foo/repo/src/plain.ts') as unknown as vscode.Uri,
+                status: 'modified',
+                unifiedDiff: '@@ p',
+            }],
+        };
+        const { options } = makeOptions({ fetchTreeDiff: async () => tree });
+        const provider = chunkProvider(['body.']);
+        const { sink, events } = collectSink();
+
+        await narrateTreeDiff(repoRoot, 'origin/main', provider, liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        const fileSection = init.sections.find((s) => s.id === 'f0');
+        expect(fileSection?.headingMarkdown).toContain('`src/plain.ts`');
+        expect(fileSection?.headingMarkdown).not.toContain('\\');
+    });
+
     test('deleted file: inline narrate-links are stripped to plain text, no reveal URI emitted', async () => {
         const deletedUri = vscode.Uri.parse('file:///foo/repo/src/gone.ts') as unknown as vscode.Uri;
         const tree: TreeDiffResult = {
