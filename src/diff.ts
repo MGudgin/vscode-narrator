@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { mapWithConcurrency } from './concurrency';
+import { normalizeRoot, relPath } from './paths';
 
 const TREE_DIFF_FETCH_CONCURRENCY = 8;
 
@@ -125,27 +126,19 @@ export async function getTreeDiff(repoRoot: vscode.Uri, baseRef: string): Promis
 
     if (!changes.some((c) => c.unifiedDiff.trim() !== '')) return { kind: 'noChanges' };
 
-    const combinedDiff = changes.map((c) => formatCombinedDiffEntry(repoRoot, c)).join('\n\n');
+    const normalizedRoot = normalizeRoot(repoRoot.fsPath || repoRoot.path);
+    const combinedDiff = changes.map((c) => formatCombinedDiffEntry(normalizedRoot, c)).join('\n\n');
     return { kind: 'modified', changes, combinedDiff };
 }
 
-function formatCombinedDiffEntry(repoRoot: vscode.Uri, change: TreeChange): string {
-    const path = relPath(repoRoot, change.uri);
-    let header = `--- FILE: ${path} (${change.status})`;
+function formatCombinedDiffEntry(normalizedRoot: string, change: TreeChange): string {
+    const rel = relPath(normalizedRoot, change.uri);
+    let header = `--- FILE: ${rel} (${change.status})`;
     if (change.status === 'renamed' && change.originalUri) {
-        header += ` from ${relPath(repoRoot, change.originalUri)}`;
+        header += ` from ${relPath(normalizedRoot, change.originalUri)}`;
     }
     header += ' ---';
     return `${header}\n${change.unifiedDiff}`;
-}
-
-function relPath(root: vscode.Uri, file: vscode.Uri): string {
-    const rootPath = (root.fsPath || root.path).replace(/\\/g, '/').replace(/\/$/, '');
-    const filePath = (file.fsPath || file.path).replace(/\\/g, '/');
-    if (rootPath && filePath.toLowerCase().startsWith(rootPath.toLowerCase() + '/')) {
-        return filePath.slice(rootPath.length + 1);
-    }
-    return filePath;
 }
 
 export async function findRepoRootForUri(uri: vscode.Uri): Promise<vscode.Uri | undefined> {

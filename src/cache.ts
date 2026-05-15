@@ -121,16 +121,30 @@ export function sectionKey(
     maxPromptTokens: number,
     info: ProviderInfo,
 ): string {
+    return sectionKeyFromHash(uri, unitName, hashContent(unitText), maxPromptTokens, info);
+}
+
+export function sectionKeyFromHash(
+    uri: vscode.Uri,
+    unitName: string,
+    unitTextHash: string,
+    maxPromptTokens: number,
+    info: ProviderInfo,
+): string {
     return hashKey([
         'section',
         uri.toString(),
         unitName,
-        unitText,
+        unitTextHash,
         String(maxPromptTokens),
         info.kind,
         info.model,
         String(PROMPT_VERSION),
     ]);
+}
+
+export function hashContent(text: string): string {
+    return crypto.createHash('sha256').update(text).digest('hex');
 }
 
 export function diffKey(uri: vscode.Uri, unifiedDiff: string, baseRef: string, info: ProviderInfo): string {
