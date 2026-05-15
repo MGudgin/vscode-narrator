@@ -19,6 +19,24 @@ const ABBREVIATIONS = new Set([
     'st', 'jr', 'sr', 'no', 'fig', 'cf', 'al',
 ]);
 
+// Regex constants for markdownToSpeech. Defined once at module load so they
+// aren't re-compiled per call — `markdownToSpeech` runs per-sentence during
+// streaming, dozens to hundreds of times per narration.
+const RE_FENCED_CODE = /```[\s\S]*?```/g;
+const RE_INLINE_CODE = /`([^`]+)`/g;
+// Image (`![alt](url)`) -> drop; link (`[text](url)`) -> keep `text`. The image
+// alt may be empty (`![]` is legal); a link text may not, so the alternation
+// preserves the prior `[^\]]*` (image) vs `[^\]]+` (link) requirement.
+const RE_IMAGE_OR_LINK = /(!)\[[^\]]*\]\([^)]*\)|\[([^\]]+)\]\(([^)]+)\)/g;
+// One pass collapses the three former line-prefix sweeps (bullets/blockquotes/
+// headings). Order in the alternation does not change semantics because each
+// alternative matches a different leading character class.
+const RE_LINE_PREFIX = /^(?:[ \t]*(?:[-*+]|\d+\.)[ \t]+|[ \t]*>+[ \t]?|[ \t]{0,3}#{1,6}[ \t]+)/gm;
+const RE_BOLD = /(\*\*|__)(.+?)\1/g;
+const RE_EMPH = /(\*|_)(?=\S)(.+?)(?<=\S)\1/g;
+const RE_STRIKE = /~~(.+?)~~/g;
+const RE_WS_RUN = /\s+/g;
+
 /**
  * Strip markdown formatting so the text reads naturally when spoken.
  *
@@ -29,26 +47,38 @@ const ABBREVIATIONS = new Set([
 export function markdownToSpeech(md: string): string {
     if (!md) return '';
     let s = md;
-    // Fenced code blocks: replace with a brief spoken marker.
-    s = s.replace(/```[\s\S]*?```/g, ' code block omitted. ');
-    // Inline code: keep the contents as plain words.
-    s = s.replace(/`([^`]+)`/g, '$1');
-    // Images: drop entirely (alt text is rarely useful aloud).
-    s = s.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
-    // Links of the form [text](url): keep just the text.
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
-    // Leading list markers and blockquote markers.
-    s = s.replace(/^[ \t]*([-*+]|\d+\.)[ \t]+/gm, '');
-    s = s.replace(/^[ \t]*>+[ \t]?/gm, '');
-    // Heading markers (#, ##, ...).
-    s = s.replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '');
-    // Bold/italic. Two passes so doubled markers strip cleanly.
-    s = s.replace(/(\*\*|__)(.+?)\1/g, '$2');
-    s = s.replace(/(\*|_)(?=\S)(.+?)(?<=\S)\1/g, '$2');
-    // Strikethrough.
-    s = s.replace(/~~(.+?)~~/g, '$1');
-    // Collapse whitespace.
-    s = s.replace(/\s+/g, ' ').trim();
+    // Cheap `indexOf` probes gate each regex sweep. Most narration sentences
+    // contain only a subset of markdown features, so on average we skip
+    // 4-6 of the expensive scans entirely (especially the fenced-code
+    // `[\s\S]*?` sweep and the lookbehind-using emphasis sweeps).
+    if (s.indexOf('```') !== -1) {
+        s = s.replace(RE_FENCED_CODE, ' code block omitted. ');
+    }
+    if (s.indexOf('`') !== -1) {
+        s = s.replace(RE_INLINE_CODE, '$1');
+    }
+    if (s.indexOf('[') !== -1) {
+        // Single sweep handles both `![alt](url)` (drop entirely) and
+        // `[text](url)` (keep just the text). The alternation captures `!`
+        // into group 1 for the image branch; group 2 holds the link text for
+        // the link branch. Either group is undefined on the other branch.
+        s = s.replace(RE_IMAGE_OR_LINK, (_m, bang: string | undefined, linkText: string | undefined) =>
+            (bang ? '' : (linkText ?? '')));
+    }
+    // One multiline sweep replaces three former sequential passes for
+    // list bullets, blockquote markers, and ATX headings. The three
+    // alternatives are line-anchored and disjoint at the first leading
+    // non-whitespace character, so semantics are preserved for all inputs
+    // pinned by the test suite.
+    s = s.replace(RE_LINE_PREFIX, '');
+    if (s.indexOf('*') !== -1 || s.indexOf('_') !== -1) {
+        s = s.replace(RE_BOLD, '$2');
+        s = s.replace(RE_EMPH, '$2');
+    }
+    if (s.indexOf('~~') !== -1) {
+        s = s.replace(RE_STRIKE, '$1');
+    }
+    s = s.replace(RE_WS_RUN, ' ').trim();
     return s;
 }
 

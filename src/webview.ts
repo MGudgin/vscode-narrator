@@ -790,6 +790,14 @@ function makeNonce(): string {
     return crypto.randomBytes(16).toString('base64');
 }
 
+const HTML_ESCAPE_RE = /[&<>"]/g;
+const HTML_ESCAPE_MAP: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+};
+
 function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return s.replace(HTML_ESCAPE_RE, (c) => HTML_ESCAPE_MAP[c]);
 }
