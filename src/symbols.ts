@@ -96,11 +96,19 @@ function clampRangeToDoc(range: vscode.Range, doc: vscode.TextDocument): vscode.
     return new vscode.Range(clampedStartLine, range.start.character, clampedEndLine, endChar);
 }
 
+let _flattenSymbolsInternalAllocations = 0;
+export function getFlattenSymbolsInternalAllocations(): number { return _flattenSymbolsInternalAllocations; }
+export function resetFlattenSymbolsInternalAllocations(): void { _flattenSymbolsInternalAllocations = 0; }
+
 export function flattenSymbols(
     symbols: vscode.DocumentSymbol[],
     parentPath: string = '',
-    out: vscode.DocumentSymbol[] = [],
+    out?: vscode.DocumentSymbol[],
 ): vscode.DocumentSymbol[] {
+    if (out === undefined) {
+        _flattenSymbolsInternalAllocations++;
+        out = [];
+    }
     for (const s of symbols) {
         const qualified = parentPath ? `${parentPath}.${s.name}` : s.name;
         out.push({

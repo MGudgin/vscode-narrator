@@ -7,6 +7,15 @@ import { SentenceBuffer, markdownToSpeech } from './speech';
 
 const RENDER_THROTTLE_MS = 100;
 
+let _renderBytesProcessed = 0;
+/** Total bytes passed through fixupLinks + renderMarkdownToHtml from the sink across the process lifetime. */
+export function getSinkRenderBytesProcessed(): number { return _renderBytesProcessed; }
+export function resetSinkRenderBytesProcessed(): void { _renderBytesProcessed = 0; }
+function renderSlice(slice: string, linkUri: vscode.Uri): string {
+    _renderBytesProcessed += slice.length;
+    return renderMarkdownToHtml(fixupLinks(slice, linkUri));
+}
+
 interface SectionState {
     accumulated: string;
     /**
@@ -43,15 +52,11 @@ function lastBlockBoundary(s: string, min: number, end: number): number {
 
 function finalSectionHtml(state: SectionState): string {
     if (state.accumulated.trim().length === 0) {
-        return renderMarkdownToHtml(
-            fixupLinks('_(no narration produced for this section.)_', state.linkUri),
-        );
+        return renderSlice('_(no narration produced for this section.)_', state.linkUri);
     }
     // Reuse the incrementally-built settled prefix and render only the tail.
     const tail = state.accumulated.slice(state.settledUpTo);
-    const tailHtml = tail.length > 0
-        ? renderMarkdownToHtml(fixupLinks(tail, state.linkUri))
-        : '';
+    const tailHtml = tail.length > 0 ? renderSlice(tail, state.linkUri) : '';
     state.settledHtml += tailHtml;
     state.settledUpTo = state.accumulated.length;
     return state.settledHtml;
@@ -95,10 +100,10 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
                     }
                     const linkUri = s.linkUri ?? fallbackLinkUri;
                     const headingHtml = s.headingMarkdown
-                        ? renderMarkdownToHtml(fixupLinks(s.headingMarkdown, linkUri))
+                        ? renderSlice(s.headingMarkdown, linkUri)
                         : '';
                     const bodyHtml = s.bodyMarkdown
-                        ? renderMarkdownToHtml(fixupLinks(s.bodyMarkdown, linkUri))
+                        ? renderSlice(s.bodyMarkdown, linkUri)
                         : '';
                     const isStatic = !!s.bodyMarkdown;
                     const initialStatus: SectionStatus = isStatic ? 'complete' : 'queued';
@@ -173,12 +178,12 @@ export function buildNarrationSink(params: SinkParams): NarrationSink {
                 );
                 if (boundary > state.settledUpTo) {
                     const newlySettled = state.accumulated.slice(state.settledUpTo, boundary);
-                    state.settledHtml += renderMarkdownToHtml(fixupLinks(newlySettled, state.linkUri));
+                    state.settledHtml += renderSlice(newlySettled, state.linkUri);
                     state.settledUpTo = boundary;
                 }
                 const tail = state.accumulated.slice(state.settledUpTo);
                 const tailHtml = tail.length > 0
-                    ? renderMarkdownToHtml(fixupLinks(tail, state.linkUri))
+                    ? renderSlice(tail, state.linkUri)
                     : '';
                 void webview.postMessage({
                     kind: 'replace',
