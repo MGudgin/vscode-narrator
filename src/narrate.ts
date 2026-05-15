@@ -239,7 +239,7 @@ export async function narrateTreeDiff(
     const concurrency = options.concurrency ?? 4;
     let anyFailure = false;
 
-    await mapWithConcurrency(allSections, concurrency, async (sec) => {
+    const { errors: treeErrors } = await mapWithConcurrency(allSections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;
         const systemPrompt = sec.kind === 'summary'
             ? TREE_SUMMARY_SYSTEM_PROMPT
@@ -273,6 +273,7 @@ export async function narrateTreeDiff(
             sink({ kind: 'sectionDone', sectionId: sec.id });
         }
     });
+    if (treeErrors.length > 0) anyFailure = true;
 
     if (token.isCancellationRequested) return;
 
@@ -372,20 +373,23 @@ async function narrateFileBody(
     }
 
     const maxPromptTokens = options.maxPromptTokens ?? readMaxPromptTokens();
-    const sections: Section[] = units.map((unit, i) => ({
-        id: `s${i}`,
-        unit,
-        headingMarkdown: buildHeading(doc.uri, unit, unit.name),
-        accumulated: '',
-        cacheKey: sectionKey(
-            doc.uri,
-            unit.name,
-            doc.getText(unit.range),
-            maxPromptTokens,
-            options.providerInfo,
-        ),
-        cachedBody: undefined,
-    }));
+    const sections: Section[] = units.map((unit, i) => {
+        const clampedUnit = clampUnitToDoc(unit, doc);
+        return {
+            id: `s${i}`,
+            unit: clampedUnit,
+            headingMarkdown: buildHeading(doc.uri, clampedUnit, clampedUnit.name),
+            accumulated: '',
+            cacheKey: sectionKey(
+                doc.uri,
+                clampedUnit.name,
+                doc.getText(clampedUnit.range),
+                maxPromptTokens,
+                options.providerInfo,
+            ),
+            cachedBody: undefined,
+        };
+    });
 
     if (!options.skipCache) {
         await Promise.all(sections.map(async (s) => {
@@ -410,7 +414,7 @@ async function narrateFileBody(
 
     const concurrency = options.concurrency ?? readSymbolConcurrency();
     let anyFailure = false;
-    await mapWithConcurrency(sections, concurrency, async (sec) => {
+    const { errors } = await mapWithConcurrency(sections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;
         if (sec.cachedBody !== undefined) return;
         try {
@@ -426,6 +430,7 @@ async function narrateFileBody(
             sink({ kind: 'sectionDone', sectionId: sec.id });
         }
     });
+    if (errors.length > 0) anyFailure = true;
 
     if (token.isCancellationRequested) return;
 
@@ -481,8 +486,9 @@ async function narrateSection(
     }
 
     // Determine the line range and total char count, then split.
-    const startLine = sec.unit.range.start.line;
-    const endLine = sec.unit.range.end.line;
+    const lastLine = Math.max(0, doc.lineCount - 1);
+    const startLine = Math.min(sec.unit.range.start.line, lastLine);
+    const endLine = Math.min(sec.unit.range.end.line, lastLine);
     const ranges = splitLineRange(startLine, endLine, fullPrompt.length, {
         maxPromptTokens,
     });
@@ -591,21 +597,56 @@ function errorMessage(err: unknown): string {
     return String(err);
 }
 
-async function mapWithConcurrency<T, R>(
+function clampUnitToDoc(unit: NarrationUnit, doc: vscode.TextDocument): NarrationUnit {
+    const lastLine = Math.max(0, doc.lineCount - 1);
+    const start = unit.range.start;
+    const end = unit.range.end;
+    if (end.line <= lastLine && start.line <= lastLine) return unit;
+    const clampedStartLine = Math.min(start.line, lastLine);
+    const clampedEndLine = Math.min(end.line, lastLine);
+    const endChar = doc.lineAt(clampedEndLine).range.end.character;
+    return {
+        kind: unit.kind,
+        name: unit.name,
+        detail: unit.detail,
+        range: new vscode.Range(clampedStartLine, start.character, clampedEndLine, endChar),
+    };
+}
+
+export interface MapWithConcurrencyError {
+    index: number;
+    error: unknown;
+}
+
+export interface MapWithConcurrencyResult<R> {
+    // Results indexed parallel to `items`. Indexes where `fn` rejected hold
+    // `undefined`; check `errors` to distinguish a thrown rejection from an
+    // `fn` that legitimately returned `undefined`.
+    results: (R | undefined)[];
+    errors: MapWithConcurrencyError[];
+}
+
+export async function mapWithConcurrency<T, R>(
     items: T[],
     concurrency: number,
     fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-    const results: R[] = new Array(items.length);
+): Promise<MapWithConcurrencyResult<R>> {
+    const results: (R | undefined)[] = new Array(items.length);
+    const errors: MapWithConcurrencyError[] = [];
     let next = 0;
     const workerCount = Math.min(concurrency, items.length);
     const workers = Array.from({ length: workerCount }, async () => {
         while (true) {
             const idx = next++;
             if (idx >= items.length) return;
-            results[idx] = await fn(items[idx]);
+            try {
+                results[idx] = await fn(items[idx]);
+            } catch (error) {
+                results[idx] = undefined;
+                errors.push({ index: idx, error });
+            }
         }
     });
     await Promise.all(workers);
-    return results;
+    return { results, errors };
 }

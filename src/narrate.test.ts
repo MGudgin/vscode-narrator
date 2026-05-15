@@ -4,6 +4,7 @@ import {
     narrateDocument,
     narrateDiff,
     narrateTreeDiff,
+    mapWithConcurrency,
     NarrationEvent,
     NarrationOptions,
     NarrationSink,
@@ -644,5 +645,91 @@ describe('narrateTreeDiff', () => {
 
         const stored = await cache.get(treeDiffKey(repoRoot, tree.combinedDiff, 'origin/main', providerInfo));
         expect(stored).toBeUndefined();
+    });
+});
+
+describe('mapWithConcurrency', () => {
+    test('a throwing worker does not orphan its siblings — remaining items are still processed', async () => {
+        const items = [0, 1, 2, 3, 4, 5, 6, 7];
+        const processed: number[] = [];
+        const { results, errors } = await mapWithConcurrency(items, 3, async (n) => {
+            if (n === 0) throw new Error('boom');
+            processed.push(n);
+            return n * 10;
+        });
+        // Every non-throwing item is processed by some surviving worker.
+        expect(processed.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+        // The throw was captured in the error channel rather than escaping.
+        expect(errors).toHaveLength(1);
+        expect(errors[0].index).toBe(0);
+        expect((errors[0].error as Error).message).toBe('boom');
+        // results[i] for failed indices is left as `undefined`.
+        expect(results[0]).toBeUndefined();
+        // Successful indices carry their fn return value.
+        expect(results[1]).toBe(10);
+        expect(results[7]).toBe(70);
+    });
+
+    test('rejection from any worker is contained — Promise.all does not reject', async () => {
+        // If the helper still let one worker's rejection escape, the awaited
+        // promise itself would reject and this test would fail with that error.
+        const items = [0, 1, 2];
+        const { errors } = await mapWithConcurrency(items, 2, async (n) => {
+            throw new Error(`fail-${n}`);
+        });
+        expect(errors).toHaveLength(3);
+        expect(errors.map((e) => (e.error as Error).message).sort()).toEqual(['fail-0', 'fail-1', 'fail-2']);
+    });
+
+    test('empty items returns empty results and no errors', async () => {
+        const { results, errors } = await mapWithConcurrency<number, number>([], 4, async () => 1);
+        expect(results).toEqual([]);
+        expect(errors).toEqual([]);
+    });
+});
+
+describe('narrateDocument — stale unit ranges (issue #108)', () => {
+    test('clamps unit ranges to the current document so lineAt does not throw', async () => {
+        // Mock doc with lineCount: 3, lineAt throws past line 2 — matches the
+        // RangeError vscode.TextDocument raises when the doc has shrunk.
+        const lines = ['line0', 'line1', 'line2'];
+        const doc: vscode.TextDocument = {
+            uri: vscode.Uri.parse('file:///foo/bar.ts') as unknown as vscode.Uri,
+            languageId: 'typescript',
+            lineCount: lines.length,
+            getText: (range?: vscode.Range) => {
+                if (!range) return lines.join('\n');
+                const startLine = Math.min(range.start.line, lines.length - 1);
+                const endLine = Math.min(range.end.line, lines.length - 1);
+                return lines.slice(startLine, endLine + 1).join('\n');
+            },
+            lineAt: (line: number) => {
+                if (line < 0 || line >= lines.length) {
+                    throw new RangeError(`Illegal value for line: ${line}`);
+                }
+                return {
+                    text: lines[line],
+                    range: new vscode.Range(line, 0, line, lines[line].length),
+                };
+            },
+        } as unknown as vscode.TextDocument;
+
+        // Symbol claims to span lines 0-50, but the doc only has 3 lines.
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'huge', range: new vscode.Range(0, 0, 50, 0) },
+        ];
+        const { options } = makeOptions({ fetchUnits: async () => units, concurrency: 1 });
+        const provider = chunkProvider(['narration.']);
+        const { sink, events } = collectSink();
+
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+
+        // No failed body should appear — the clamp prevented the RangeError.
+        const chunkTexts = events
+            .filter((e): e is Extract<NarrationEvent, { kind: 'chunk' }> => e.kind === 'chunk')
+            .map((e) => e.text);
+        expect(chunkTexts.some((t) => t.includes('failed:'))).toBe(false);
+        expect(chunkTexts.some((t) => t.includes('Illegal value for line'))).toBe(false);
+        expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
     });
 });

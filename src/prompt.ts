@@ -146,15 +146,18 @@ export function buildSymbolUserPromptForRange(
     endLine: number,
 ): string {
     const path = vscode.workspace.asRelativePath(doc.uri);
-    const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).range.end.character);
+    const lastLine = Math.max(0, doc.lineCount - 1);
+    const clampedStart = Math.min(Math.max(0, startLine), lastLine);
+    const clampedEnd = Math.min(Math.max(clampedStart, endLine), lastLine);
+    const range = new vscode.Range(clampedStart, 0, clampedEnd, doc.lineAt(clampedEnd).range.end.character);
     const numbered = numberLinesInRange(doc, range);
     const baseHeader = unit.kind === 'symbol'
         ? `Section: ${unit.name}${unit.detail ? ` — ${unit.detail}` : ''}`
         : `Section: ${unit.name} (file region — imports, module-level code, etc.)`;
     const totalStart = unit.range.start.line + 1;
     const totalEnd = unit.range.end.line + 1;
-    const chunkStart = startLine + 1;
-    const chunkEnd = endLine + 1;
+    const chunkStart = clampedStart + 1;
+    const chunkEnd = clampedEnd + 1;
     const chunkNote = `Chunk lines L${chunkStart}-L${chunkEnd} of full section L${totalStart}-L${totalEnd}. This is one sub-chunk of an oversized section; narrate only what is in this chunk.`;
     return `File: ${path}\nLanguage: ${doc.languageId}\n${baseHeader}\n${chunkNote}\n\nSource:\n${numbered}`;
 }
@@ -177,8 +180,9 @@ function numberLines(text: string): string {
 }
 
 function numberLinesInRange(doc: vscode.TextDocument, range: vscode.Range): string {
-    const startLine = range.start.line;
-    const endLine = range.end.line;
+    const lastLine = Math.max(0, doc.lineCount - 1);
+    const startLine = Math.min(Math.max(0, range.start.line), lastLine);
+    const endLine = Math.min(Math.max(startLine, range.end.line), lastLine);
     const width = String(endLine + 1).length;
     const out: string[] = [];
     for (let i = startLine; i <= endLine; i++) {
