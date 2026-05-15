@@ -54,6 +54,23 @@ function measure(label: string, fn: () => void | Promise<void>): Promise<number>
     return Promise.resolve(elapsed);
 }
 
+// Best-of-N microbenchmark: take the minimum elapsed across `samples` runs to
+// filter CI neighbour noise and GC pauses. Single-sample timings of fast
+// (sub-10 ms) operations are too variance-prone to assert tight ratios against.
+async function measureBest(label: string, fn: () => void | Promise<void>, samples = 5): Promise<number> {
+    let best = Infinity;
+    for (let i = 0; i < samples; i++) {
+        const start = performance.now();
+        const r = fn();
+        if (r instanceof Promise) await r;
+        const elapsed = performance.now() - start;
+        if (elapsed < best) best = elapsed;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[perf] ${label}: best ${best.toFixed(2)} ms (of ${samples})`);
+    return best;
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Issue: NarrationCache.get() touches the LRU timestamp by REWRITING the
 // entire cache array on every read hit. With many cached entries this is
@@ -143,20 +160,18 @@ describe('[perf] flattenSymbols scaling on deep symbol trees', () => {
     test('flat output size grows linearly and timing stays near-linear with depth', async () => {
         const N = 1000;
         const FOURX = N * 4;
-        // Warm-up to stabilize V8's inlining / GC before measurement.
+        // Warm-up so V8 inlining / GC settles before any timed run.
         flattenSymbols(makeDeepTree(N));
         flattenSymbols(makeDeepTree(FOURX));
-        const tn = await measure(`flattenSymbols depth=${N}`, () => {
+        const tn = await measureBest(`flattenSymbols depth=${N}`, () => {
             flattenSymbols(makeDeepTree(N));
         });
-        const t4n = await measure(`flattenSymbols depth=${FOURX}`, () => {
+        const t4n = await measureBest(`flattenSymbols depth=${FOURX}`, () => {
             flattenSymbols(makeDeepTree(FOURX));
         });
         const ratio = t4n / Math.max(tn, 0.001);
         // eslint-disable-next-line no-console
         console.log(`[perf] flattenSymbols 4x ratio = ${ratio.toFixed(2)} (linear=4, quadratic=16)`);
-        // Post-fix the accumulator pattern collapses the recursion overhead;
-        // assert the ratio is comfortably sub-quadratic.
         expect(ratio).toBeLessThan(5);
     });
 });
