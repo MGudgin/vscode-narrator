@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import { mapWithConcurrency } from './concurrency';
+
+const TREE_DIFF_FETCH_CONCURRENCY = 8;
 
 export type DiffResult =
     | { kind: 'noRepo' }
@@ -104,8 +107,7 @@ export async function getTreeDiff(repoRoot: vscode.Uri, baseRef: string): Promis
 
     if (!rawChanges || rawChanges.length === 0) return { kind: 'noChanges' };
 
-    const changes: TreeChange[] = [];
-    for (const c of rawChanges) {
+    const { results } = await mapWithConcurrency(rawChanges, TREE_DIFF_FETCH_CONCURRENCY, async (c) => {
         const status = mapStatus(c.status);
         let unifiedDiff = '';
         try {
@@ -115,8 +117,9 @@ export async function getTreeDiff(repoRoot: vscode.Uri, baseRef: string): Promis
         }
         const change: TreeChange = { uri: c.uri, status, unifiedDiff };
         if (status === 'renamed' && c.originalUri) change.originalUri = c.originalUri;
-        changes.push(change);
-    }
+        return change;
+    });
+    const changes: TreeChange[] = results.filter((c): c is TreeChange => c !== undefined);
 
     changes.sort((a, b) => a.uri.fsPath.localeCompare(b.uri.fsPath));
 
