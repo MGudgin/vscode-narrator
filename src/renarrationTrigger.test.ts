@@ -4,9 +4,11 @@ import {
     SAVE_DEBOUNCE_MS,
     REPO_STATE_DEBOUNCE_MS,
     ACTIVE_EDITOR_DEBOUNCE_MS,
+    LIVE_EDIT_DEBOUNCE_MS,
     evaluateSaveTrigger,
     evaluateRepoStateTrigger,
     evaluateActiveEditorTrigger,
+    evaluateLiveEditTrigger,
 } from './renarrationTrigger';
 import type { NarrationTarget } from './target';
 
@@ -188,6 +190,9 @@ describe('debounce constants match the policy preserved from extension.ts', () =
         expect(SAVE_DEBOUNCE_MS).toBe(500);
         expect(REPO_STATE_DEBOUNCE_MS).toBe(750);
         expect(ACTIVE_EDITOR_DEBOUNCE_MS).toBe(250);
+        // #26 live-edit needs a longer settle window than save.
+        expect(LIVE_EDIT_DEBOUNCE_MS).toBe(1500);
+        expect(LIVE_EDIT_DEBOUNCE_MS).toBeGreaterThan(SAVE_DEBOUNCE_MS);
     });
 });
 
@@ -300,5 +305,147 @@ describe('evaluateActiveEditorTrigger', () => {
             currentTarget: fileA,
             newDocUri: undefined,
         }).allow).toBe(false);
+    });
+});
+
+describe('evaluateLiveEditTrigger (#26)', () => {
+    const fileA = fileTarget('file:///a');
+
+    test('allows when panel is open, setting is on, target is the file, and doc matches', () => {
+        const ev = evaluateLiveEditTrigger({
+            panelOpen: true,
+            liveEditEnabled: true,
+            currentTarget: fileA,
+            changedDocUri: docUri('file:///a'),
+        });
+        expect(ev.allow).toBe(true);
+        expect(ev.target).toBe(fileA);
+    });
+
+    test('denies when the setting is off', () => {
+        const ev = evaluateLiveEditTrigger({
+            panelOpen: true,
+            liveEditEnabled: false,
+            currentTarget: fileA,
+            changedDocUri: docUri('file:///a'),
+        });
+        expect(ev.allow).toBe(false);
+    });
+
+    test('denies when the pane shows a different document', () => {
+        const ev = evaluateLiveEditTrigger({
+            panelOpen: true,
+            liveEditEnabled: true,
+            currentTarget: fileA,
+            changedDocUri: docUri('file:///other'),
+        });
+        expect(ev.allow).toBe(false);
+    });
+
+    test('denies when the current target is a diff (pinned)', () => {
+        const diff = diffTarget('file:///a');
+        const ev = evaluateLiveEditTrigger({
+            panelOpen: true,
+            liveEditEnabled: true,
+            currentTarget: diff,
+            changedDocUri: docUri('file:///a'),
+        });
+        expect(ev.allow).toBe(false);
+    });
+
+    test('denies when the panel is closed', () => {
+        const ev = evaluateLiveEditTrigger({
+            panelOpen: false,
+            liveEditEnabled: true,
+            currentTarget: fileA,
+            changedDocUri: docUri('file:///a'),
+        });
+        expect(ev.allow).toBe(false);
+    });
+
+    test('denies when there is no current target', () => {
+        const ev = evaluateLiveEditTrigger({
+            panelOpen: true,
+            liveEditEnabled: true,
+            currentTarget: undefined,
+            changedDocUri: docUri('file:///a'),
+        });
+        expect(ev.allow).toBe(false);
+    });
+});
+
+describe('RenarrationTrigger wired with evaluateLiveEditTrigger (#26 integration)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    test('coalesces a burst of edit events into a single dispatch', () => {
+        const dispatch = vi.fn();
+        const target = fileTarget('file:///live');
+        const trigger = new RenarrationTrigger<{ toString(): string }>(
+            'liveEdit',
+            LIVE_EDIT_DEBOUNCE_MS,
+            (changedUri) => evaluateLiveEditTrigger({
+                panelOpen: true,
+                liveEditEnabled: true,
+                currentTarget: target,
+                changedDocUri: changedUri,
+            }),
+            dispatch,
+        );
+
+        for (let i = 0; i < 10; i++) {
+            trigger.fire(docUri('file:///live'));
+            vi.advanceTimersByTime(100);
+        }
+        expect(dispatch).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(LIVE_EDIT_DEBOUNCE_MS);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledWith(target, undefined);
+    });
+
+    test('does not fire when the changed document is different from the target', () => {
+        const dispatch = vi.fn();
+        const target = fileTarget('file:///live');
+        const trigger = new RenarrationTrigger<{ toString(): string }>(
+            'liveEdit',
+            LIVE_EDIT_DEBOUNCE_MS,
+            (changedUri) => evaluateLiveEditTrigger({
+                panelOpen: true,
+                liveEditEnabled: true,
+                currentTarget: target,
+                changedDocUri: changedUri,
+            }),
+            dispatch,
+        );
+
+        trigger.fire(docUri('file:///somewhere/else'));
+        vi.advanceTimersByTime(LIVE_EDIT_DEBOUNCE_MS * 2);
+        expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('does not fire when liveEdit setting is off', () => {
+        const dispatch = vi.fn();
+        const target = fileTarget('file:///live');
+        let enabled = false;
+        const trigger = new RenarrationTrigger<{ toString(): string }>(
+            'liveEdit',
+            LIVE_EDIT_DEBOUNCE_MS,
+            (changedUri) => evaluateLiveEditTrigger({
+                panelOpen: true,
+                liveEditEnabled: enabled,
+                currentTarget: target,
+                changedDocUri: changedUri,
+            }),
+            dispatch,
+        );
+
+        trigger.fire(docUri('file:///live'));
+        vi.advanceTimersByTime(LIVE_EDIT_DEBOUNCE_MS * 2);
+        expect(dispatch).not.toHaveBeenCalled();
+
+        enabled = true;
+        trigger.fire(docUri('file:///live'));
+        vi.advanceTimersByTime(LIVE_EDIT_DEBOUNCE_MS);
+        expect(dispatch).toHaveBeenCalledTimes(1);
     });
 });
