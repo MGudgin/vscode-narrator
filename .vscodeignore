@@ -3,6 +3,8 @@
 .github/**
 src/**
 test/**
+scripts/**
+media/screenshots/**
 node_modules/**
 .gitignore
 .git/**
