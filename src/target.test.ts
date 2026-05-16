@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
     targetTitle,
     targetBannerLabel,
+    bannerLabelWithPersona,
     targetMatchesSavedDoc,
     targetShortName,
     isAllowedRevealUri,
@@ -52,6 +53,27 @@ describe('targetBannerLabel', () => {
 
     test('returns "Tree diff vs <ref>" for tree targets', () => {
         expect(targetBannerLabel(treeTarget)).toBe('Tree diff vs origin/main');
+    });
+});
+
+describe('bannerLabelWithPersona', () => {
+    test('omits the default persona label so the banner stays uncluttered', () => {
+        expect(bannerLabelWithPersona(fileTarget, 'Default')).toBe('Full file');
+        expect(bannerLabelWithPersona(diffTarget, 'Default')).toBe('Diff vs origin/main');
+    });
+
+    test('omits an empty/missing persona label', () => {
+        expect(bannerLabelWithPersona(fileTarget, undefined)).toBe('Full file');
+        expect(bannerLabelWithPersona(fileTarget, '')).toBe('Full file');
+    });
+
+    test('appends non-default persona label with a bullet separator', () => {
+        expect(bannerLabelWithPersona(fileTarget, 'Security reviewer'))
+            .toBe('Full file • Security reviewer');
+        expect(bannerLabelWithPersona(diffTarget, 'Critical reviewer'))
+            .toBe('Diff vs origin/main • Critical reviewer');
+        expect(bannerLabelWithPersona(treeTarget, 'Performance reviewer'))
+            .toBe('Tree diff vs origin/main • Performance reviewer');
     });
 });
 

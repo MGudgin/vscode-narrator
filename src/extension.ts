@@ -70,6 +70,15 @@ let quickPickResolver: QuickPickResolver | undefined;
 
 let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
+/**
+ * Per-invocation persona override (#23). Set by the `…With Persona` commands
+ * so that subsequent save-debounced and refresh runs of the same target keep
+ * using the overridden lens; cleared when the user invokes a fresh
+ * `Open Narration` / `Open Diff Narration` / `Open Tree Diff Narration` (no
+ * "with persona" variant), or when the user changes the global setting via
+ * `pickPersona`. `undefined` means "use the `codeNarration.persona` setting".
+ */
+let currentPersonaOverride: string | undefined;
 let inFlight: vscode.CancellationTokenSource | undefined;
 let saveDebounce: NodeJS.Timeout | undefined;
 let selectionDebounce: NodeJS.Timeout | undefined;
@@ -106,11 +115,16 @@ function refreshNarrateOnSaveCache(): void {
 interface RunOptions {
     skipCache?: boolean;
     /**
-     * Per-invocation persona override (#23). Takes precedence over the
-     * `codeNarration.persona` setting for this run; subsequent runs revert to
-     * the setting unless they also pass an override.
+     * Per-invocation persona handling (#23):
+     *
+     * - `{ kind: 'set', personaId }` — install `personaId` as the per-invocation
+     *   override before resolving the persona. Subsequent refresh/save re-runs
+     *   keep using it until cleared.
+     * - `{ kind: 'clear' }` — explicitly drop any existing per-invocation
+     *   override, falling back to the `codeNarration.persona` setting.
+     * - omitted — preserve whatever override (if any) is currently active.
      */
-    personaIdOverride?: string;
+    personaOverride?: { kind: 'set'; personaId: string } | { kind: 'clear' };
 }
 
 /**
@@ -162,6 +176,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.commands.registerCommand(
             'codeNarration.openTreeDiff',
             (source?: vscode.SourceControl) => openTreeDiffNarration(context, source),
+        ),
+        vscode.commands.registerCommand(
+            'codeNarration.openWithPersona',
+            (personaArg?: unknown) => openFileNarrationWithPersona(context, personaArg),
+        ),
+        vscode.commands.registerCommand(
+            'codeNarration.openDiffWithPersona',
+            (personaArg?: unknown) => openDiffNarrationWithPersona(context, personaArg),
         ),
         vscode.commands.registerCommand('codeNarration.refresh', () => refreshNarration(context)),
         vscode.commands.registerCommand('codeNarration.reveal', revealLocation),
@@ -281,7 +303,9 @@ async function openFileNarration(context: vscode.ExtensionContext): Promise<void
         return;
     }
     ensurePanel(context);
-    await runNarration(context, { kind: 'file', uri: editor.document.uri });
+    await runNarration(context, { kind: 'file', uri: editor.document.uri }, {
+        personaOverride: { kind: 'clear' },
+    });
 }
 
 async function openDiffNarration(context: vscode.ExtensionContext): Promise<void> {
@@ -293,7 +317,9 @@ async function openDiffNarration(context: vscode.ExtensionContext): Promise<void
     }
     const baseRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
     ensurePanel(context);
-    await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef });
+    await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef }, {
+        personaOverride: { kind: 'clear' },
+    });
 }
 
 async function openTreeDiffNarration(
@@ -323,7 +349,9 @@ async function openTreeDiffNarration(
     }
     const baseRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
     ensurePanel(context);
-    await runNarration(context, { kind: 'tree', repoRoot, baseRef });
+    await runNarration(context, { kind: 'tree', repoRoot, baseRef }, {
+        personaOverride: { kind: 'clear' },
+    });
 }
 
 async function pickRepoRoot(roots: vscode.Uri[]): Promise<vscode.Uri | undefined> {
@@ -350,6 +378,76 @@ async function refreshNarration(context: vscode.ExtensionContext): Promise<void>
     }
     ensurePanel(context);
     await runNarration(context, currentTarget, { skipCache: true });
+}
+
+/**
+ * Resolve a persona id from a command argument or, if absent, by prompting
+ * the user with a built-in persona quick-pick. Used by the per-invocation
+ * commands (#23) so they can be invoked either interactively or via a
+ * keybinding bound to a specific persona id.
+ */
+async function pickPersonaIdForInvocation(argv: unknown): Promise<string | undefined> {
+    if (typeof argv === 'string' && argv.length > 0) {
+        return argv;
+    }
+    const items: PersonaPickItem[] = listBuiltInPersonaIds().map((id) => {
+        const persona = getBuiltInPersona(id)!;
+        return {
+            label: persona.label,
+            description: id,
+            detail: persona.description,
+            personaId: id,
+        };
+    });
+    const choice = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Pick a persona for this narration (does not change the setting)',
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+    return choice?.personaId;
+}
+
+/**
+ * `Code Narration: Open Narration with…` — per-invocation persona override
+ * (#23). Accepts an optional persona id argument so keybindings can target a
+ * specific lens (e.g. bind Ctrl+Shift+S to security narration). The chosen
+ * persona only affects this invocation and subsequent save/refresh runs of
+ * the same target; the global `codeNarration.persona` setting is untouched.
+ */
+async function openFileNarrationWithPersona(
+    context: vscode.ExtensionContext,
+    personaArg?: unknown,
+): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showInformationMessage('Open a file to narrate.');
+        return;
+    }
+    const personaId = await pickPersonaIdForInvocation(personaArg);
+    if (!personaId) return;
+    ensurePanel(context);
+    await runNarration(context, { kind: 'file', uri: editor.document.uri }, {
+        personaOverride: { kind: 'set', personaId },
+    });
+}
+
+/** Per-invocation persona override for diff narration; see openFileNarrationWithPersona. */
+async function openDiffNarrationWithPersona(
+    context: vscode.ExtensionContext,
+    personaArg?: unknown,
+): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showInformationMessage('Open a file to narrate diffs for.');
+        return;
+    }
+    const personaId = await pickPersonaIdForInvocation(personaArg);
+    if (!personaId) return;
+    const baseRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
+    ensurePanel(context);
+    await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef }, {
+        personaOverride: { kind: 'set', personaId },
+    });
 }
 
 function ensurePanel(context: vscode.ExtensionContext): void {
@@ -380,6 +478,7 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         () => {
             panel = undefined;
             currentTarget = undefined;
+            currentPersonaOverride = undefined;
             inFlight?.cancel();
             repoWatcher?.dispose();
             repoWatcher = undefined;
@@ -487,7 +586,12 @@ async function runNarration(
 
     currentTarget = target;
     sectionRanges.length = 0;
-    const persona = resolveActivePersona(opts.personaIdOverride);
+    if (opts.personaOverride?.kind === 'set') {
+        currentPersonaOverride = opts.personaOverride.personaId;
+    } else if (opts.personaOverride?.kind === 'clear') {
+        currentPersonaOverride = undefined;
+    }
+    const persona = resolveActivePersona(currentPersonaOverride);
     const bannerLabel = bannerLabelWithPersona(target, persona.label);
     const speechConfig = readSpeechConfig();
     panel.title = targetTitle(target);
@@ -764,6 +868,10 @@ async function pickPersona(): Promise<void> {
     await vscode.workspace
         .getConfiguration('codeNarration')
         .update('persona', choice.personaId, vscode.ConfigurationTarget.Global);
+    // Picking from the global setting menu implies the user is replacing the
+    // active lens, including any per-invocation override left over from a
+    // previous `…With Persona` run.
+    currentPersonaOverride = undefined;
     vscode.window.showInformationMessage(`Code Narration: persona set to ${choice.label}.`);
     if (currentTarget) {
         // Re-run the active narration so the banner and prompts reflect the

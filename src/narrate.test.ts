@@ -15,6 +15,7 @@ import { DEFAULT_MAX_PROMPT_TOKENS } from './chunking';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit } from './symbols';
 import { DiffResult, TreeDiffResult } from './diff';
+import { resolvePersona, getDefaultPersona } from './personas';
 
 class MemoryMemento implements vscode.Memento {
     private store = new Map<string, unknown>();
@@ -996,6 +997,104 @@ describe('narrateDocument — stale unit ranges (issue #108)', () => {
         expect(chunkTexts.some((t) => t.includes('failed:'))).toBe(false);
         expect(chunkTexts.some((t) => t.includes('Illegal value for line'))).toBe(false);
         expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
+    });
+});
+
+describe('narrate persona routing (#22)', () => {
+    test('default options use the built-in default persona prompts', async () => {
+        const { options } = makeOptions({ fetchUnits: async () => [] });
+        const doc = mockDoc('hello\n');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['x'], calls);
+        const { sink } = collectSink();
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+        expect(calls).toHaveLength(1);
+        // Default persona's system prompt is the plain SYSTEM_PROMPT (no lens
+        // preamble) — it should start with "You are a code narrator.".
+        expect(calls[0].systemPrompt.startsWith('You are a code narrator.')).toBe(true);
+    });
+
+    test('non-default persona routes a lens-prefixed system prompt to the provider', async () => {
+        const security = resolvePersona('security');
+        const { options } = makeOptions({ fetchUnits: async () => [], persona: security });
+        const doc = mockDoc('hello\n');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['x'], calls);
+        const { sink } = collectSink();
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].systemPrompt).toMatch(/security lens/i);
+        // Base output rules must still be appended.
+        expect(calls[0].systemPrompt).toContain('You are a code narrator.');
+    });
+
+    test('switching personas invalidates the file cache (issue #22 acceptance)', async () => {
+        const def = getDefaultPersona();
+        const security = resolvePersona('security');
+        const doc = mockDoc('hello\n');
+
+        const cache = new NarrationCache(new MemoryMemento());
+        const baseOptions: NarrationOptions = {
+            skipCache: false,
+            cache,
+            providerInfo,
+            fetchUnits: async () => [],
+        };
+
+        const defaultCalls: ProviderCall[] = [];
+        await narrateDocument(doc, chunkProvider(['default-body'], defaultCalls), liveToken(), () => {}, {
+            ...baseOptions,
+            persona: def,
+        });
+        expect(defaultCalls).toHaveLength(1);
+
+        // Same target, different persona → must miss in cache and call the
+        // provider again rather than returning the previously-cached body.
+        const securityCalls: ProviderCall[] = [];
+        await narrateDocument(doc, chunkProvider(['security-body'], securityCalls), liveToken(), () => {}, {
+            ...baseOptions,
+            persona: security,
+        });
+        expect(securityCalls).toHaveLength(1);
+
+        // Switching back to default reuses the prior cache entry — no extra call.
+        const defaultRecalls: ProviderCall[] = [];
+        await narrateDocument(doc, chunkProvider(['x'], defaultRecalls), liveToken(), () => {}, {
+            ...baseOptions,
+            persona: def,
+        });
+        expect(defaultRecalls).toHaveLength(0);
+    });
+
+    test('per-section symbol narrations use the persona symbolSystem prompt', async () => {
+        const performance = resolvePersona('performance');
+        const units: NarrationUnit[] = [
+            { kind: 'symbol', name: 'foo', range: new vscode.Range(0, 0, 1, 0) },
+        ];
+        const { options } = makeOptions({
+            fetchUnits: async () => units,
+            persona: performance,
+        });
+        const doc = mockDoc('line0\nline1\n');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['body'], calls);
+        const { sink } = collectSink();
+        await narrateDocument(doc, provider, liveToken(), sink, options);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].systemPrompt).toMatch(/performance lens/i);
+    });
+
+    test('diff narrations use the persona diffSystem prompt', async () => {
+        const critical = resolvePersona('critical');
+        const diff: DiffResult = { kind: 'modified', unifiedDiff: '@@ -1 +1 @@\n-old\n+new' };
+        const { options } = makeOptions({ fetchDiff: async () => diff, persona: critical });
+        const doc = mockDoc('hello\n');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['x'], calls);
+        const { sink } = collectSink();
+        await narrateDiff(doc, 'origin/main', provider, liveToken(), sink, options);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].systemPrompt).toMatch(/critical pull-request reviewer/i);
     });
 });
 
