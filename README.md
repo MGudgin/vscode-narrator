@@ -34,6 +34,17 @@ You can also edit settings directly:
 - **Follow active editor**: enable `codeNarration.followActiveEditor` to retarget file-mode narration as focus moves between files. Diff and tree-diff stay pinned regardless.
 - **Speech**: enable `codeNarration.speech.enabled` to show TTS controls in the banner (play / pause / stop, voice picker, rate slider). With `codeNarration.speech.autoPlay` on, sentences are spoken as they stream in.
 
+### Speak it out loud
+
+Code Narration can read narrations aloud using your operating system's installed speech voices (via the Web Speech API in the narration webview):
+
+1. Enable `codeNarration.speech.enabled`. **TTS controls appear in the narration pane banner**: ▶ play, ⏸ pause, ■ stop, a voice picker, and a rate slider. There's also a ▶ button next to each section heading to jump speech to that section.
+2. Pick a voice with **Code Narration: Pick Voice** (or the banner dropdown). Choices are persisted to `codeNarration.speech.voice`.
+3. Run **Code Narration: Speak Narration** (or click ▶ in the banner) to start playback. Sentences are emitted as the narration streams in, so spoken playback keeps up with the model.
+4. Turn on `codeNarration.speech.autoPlay` to have new narrations start speaking automatically as soon as a sentence is ready.
+
+First-run users get a walkthrough — **Get Started: Listen to your code (spoken narration)** — that links to each setting and command.
+
 ### What you'll see
 
 - **Per-section status dot** next to each heading: grey while waiting for a worker, amber and pulsing while chunks stream in, green once the section is complete. Diff mode shows a single dot at the top of the pane in the same colour scheme.
