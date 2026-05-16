@@ -100,6 +100,47 @@ interface RunOptions {
     skipCache?: boolean;
 }
 
+/**
+ * Pure helper used by every narration command to enforce the
+ * untrustedWorkspaces capability promise in package.json:
+ *
+ *     "In an untrusted workspace, narration commands stay disabled because
+ *      the file's contents (and, in tree mode, every changed file in the
+ *      repo) are forwarded to a third-party language model."
+ *
+ * VS Code's `"supported": "limited"` mode only routes `restrictedConfigurations`
+ * back to user-scope values — it does NOT block command invocation. So the
+ * gate must be enforced in code: every narration command short-circuits with
+ * a user-facing warning when `workspace.isTrusted` is false. Settings,
+ * cache, voice, and reveal commands are NOT gated — they don't send file
+ * contents anywhere.
+ *
+ * Returns `true` when the workspace is trusted and the command should run.
+ * Returns `false` after surfacing a warning when the workspace is untrusted.
+ *
+ * Exported as a pure helper so the gate logic is unit-testable without
+ * spinning up a real VS Code workspace.
+ */
+export function ensureWorkspaceTrustedForNarration(
+    isTrusted: boolean,
+    commandLabel: string,
+    showWarning: (message: string) => void,
+): boolean {
+    if (isTrusted) return true;
+    showWarning(
+        `${commandLabel}: narration is disabled in untrusted workspaces because it would forward file contents to a third-party language model. Trust the workspace to enable narration.`,
+    );
+    return false;
+}
+
+function isNarrationAllowed(commandLabel: string): boolean {
+    return ensureWorkspaceTrustedForNarration(
+        vscode.workspace.isTrusted,
+        commandLabel,
+        (msg) => { vscode.window.showWarningMessage(msg); },
+    );
+}
+
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
     cache = new NarrationCache(context.workspaceState);
     context.subscriptions.push(
@@ -219,6 +260,7 @@ export function deactivate(): void {
 }
 
 async function openFileNarration(context: vscode.ExtensionContext): Promise<void> {
+    if (!isNarrationAllowed('Open Narration')) return;
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
         vscode.window.showInformationMessage('Open a file to narrate.');
@@ -229,6 +271,7 @@ async function openFileNarration(context: vscode.ExtensionContext): Promise<void
 }
 
 async function openDiffNarration(context: vscode.ExtensionContext): Promise<void> {
+    if (!isNarrationAllowed('Open Diff Narration')) return;
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
         vscode.window.showInformationMessage('Open a file to narrate diffs for.');
@@ -243,6 +286,7 @@ async function openTreeDiffNarration(
     context: vscode.ExtensionContext,
     source?: vscode.SourceControl,
 ): Promise<void> {
+    if (!isNarrationAllowed('Open Tree Diff Narration')) return;
     let repoRoot: vscode.Uri | undefined = source?.rootUri;
     if (!repoRoot) {
         const editor = vscode.window.activeTextEditor;
@@ -285,6 +329,7 @@ async function pickRepoRoot(roots: vscode.Uri[]): Promise<vscode.Uri | undefined
 }
 
 async function refreshNarration(context: vscode.ExtensionContext): Promise<void> {
+    if (!isNarrationAllowed('Refresh Narration')) return;
     if (!currentTarget) {
         vscode.window.showInformationMessage('No narration to refresh. Open one first.');
         return;
@@ -414,6 +459,12 @@ async function runNarration(
     opts: RunOptions = {},
 ): Promise<void> {
     if (!panel || !cache) return;
+    // Defence in depth: every entry point already gates on workspace trust,
+    // but auto-narrations triggered by save / selection / active-editor /
+    // repo-state events route through here without re-passing the command
+    // entry. Bail silently here so a workspace that becomes untrusted mid-
+    // session cannot leak subsequent file contents to the LLM.
+    if (!vscode.workspace.isTrusted) return;
 
     inFlight?.cancel();
     inFlight?.dispose();
