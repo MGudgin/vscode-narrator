@@ -12,7 +12,7 @@ import {
 } from './llm/index';
 import { narrateDocument, narrateDiff, narrateTreeDiff, readNarrationConfigSnapshot } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
-import { NarrationTarget, targetMatchesSavedDoc, targetTitle, bannerLabelWithPersona, targetShortName, isAllowedRevealUri, shouldFollowEditor } from './target';
+import { NarrationTarget, targetTitle, bannerLabelWithPersona, targetShortName, isAllowedRevealUri } from './target';
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState, shouldRefreshOnRepoStateEvent } from './diff';
 import { buildNarrationSink } from './sink';
@@ -23,6 +23,15 @@ import {
     listBuiltInPersonaIds,
     getBuiltInPersona,
 } from './personas';
+import {
+    RenarrationTrigger,
+    SAVE_DEBOUNCE_MS,
+    REPO_STATE_DEBOUNCE_MS,
+    ACTIVE_EDITOR_DEBOUNCE_MS,
+    evaluateSaveTrigger,
+    evaluateRepoStateTrigger,
+    evaluateActiveEditorTrigger,
+} from './renarrationTrigger';
 
 export type ProviderFactory = (
     context: vscode.ExtensionContext,
@@ -71,20 +80,17 @@ let quickPickResolver: QuickPickResolver | undefined;
 let panel: vscode.WebviewPanel | undefined;
 let currentTarget: NarrationTarget | undefined;
 let inFlight: vscode.CancellationTokenSource | undefined;
-let saveDebounce: NodeJS.Timeout | undefined;
 let selectionDebounce: NodeJS.Timeout | undefined;
-let repoStateDebounce: NodeJS.Timeout | undefined;
-let activeEditorDebounce: NodeJS.Timeout | undefined;
+let saveTrigger: RenarrationTrigger<vscode.TextDocument> | undefined;
+let repoStateTrigger: RenarrationTrigger<void> | undefined;
+let activeEditorTrigger: RenarrationTrigger<vscode.TextEditor | undefined> | undefined;
 let repoWatcher: vscode.Disposable | undefined;
 let watchedRepoRoot: string | undefined;
 let repoWatcherPrimed = false;
 let cache: NarrationCache | undefined;
 const sectionRanges: { id: string; range: vscode.Range }[] = [];
 
-const SAVE_DEBOUNCE_MS = 500;
 const SELECTION_DEBOUNCE_MS = 200;
-const REPO_STATE_DEBOUNCE_MS = 750;
-const ACTIVE_EDITOR_DEBOUNCE_MS = 250;
 
 let cachedNarrateOnSave: boolean | undefined;
 
@@ -156,6 +162,7 @@ function isNarrationAllowed(commandLabel: string): boolean {
 
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
     cache = new NarrationCache(context.workspaceState);
+    initTriggers(context);
     context.subscriptions.push(
         vscode.commands.registerCommand('codeNarration.open', () => openFileNarration(context)),
         vscode.commands.registerCommand('codeNarration.openDiff', () => openDiffNarration(context)),
@@ -172,9 +179,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.commands.registerCommand('codeNarration.speak', () => speechControl('play')),
         vscode.commands.registerCommand('codeNarration.stopSpeech', () => speechControl('stop')),
         vscode.commands.registerCommand('codeNarration.pickVoice', () => pickVoice()),
-        vscode.workspace.onDidSaveTextDocument((doc) => onSave(context, doc)),
+        vscode.workspace.onDidSaveTextDocument((doc) => saveTrigger?.fire(doc)),
         vscode.window.onDidChangeTextEditorSelection(onSelectionChange),
-        vscode.window.onDidChangeActiveTextEditor((editor) => onActiveEditorChange(context, editor)),
+        vscode.window.onDidChangeActiveTextEditor((editor) => activeEditorTrigger?.fire(editor)),
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('codeNarration.speech')) onSpeechConfigChange();
             if (e.affectsConfiguration('codeNarration.narrateOnSave')) refreshNarrateOnSaveCache();
@@ -262,15 +269,54 @@ export function deactivate(): void {
     inFlight?.cancel();
     inFlight?.dispose();
     panel?.dispose();
-    if (saveDebounce) clearTimeout(saveDebounce);
+    saveTrigger?.cancel();
+    repoStateTrigger?.cancel();
+    activeEditorTrigger?.cancel();
+    saveTrigger = undefined;
+    repoStateTrigger = undefined;
+    activeEditorTrigger = undefined;
     if (selectionDebounce) clearTimeout(selectionDebounce);
-    if (repoStateDebounce) clearTimeout(repoStateDebounce);
-    if (activeEditorDebounce) clearTimeout(activeEditorDebounce);
     repoWatcher?.dispose();
     repoWatcher = undefined;
     watchedRepoRoot = undefined;
     repoWatcherPrimed = false;
     cachedNarrateOnSave = undefined;
+}
+
+function initTriggers(context: vscode.ExtensionContext): void {
+    saveTrigger = new RenarrationTrigger<vscode.TextDocument>(
+        'save',
+        SAVE_DEBOUNCE_MS,
+        (doc) => evaluateSaveTrigger({
+            panelOpen: panel !== undefined,
+            currentTarget,
+            narrateOnSave: readNarrateOnSave(),
+            savedDocUri: doc.uri,
+        }),
+        (target) => void runNarration(context, target),
+    );
+    repoStateTrigger = new RenarrationTrigger<void>(
+        'repoState',
+        REPO_STATE_DEBOUNCE_MS,
+        () => evaluateRepoStateTrigger({
+            panelOpen: panel !== undefined,
+            currentTarget,
+        }),
+        (target) => void runNarration(context, target),
+    );
+    activeEditorTrigger = new RenarrationTrigger<vscode.TextEditor | undefined>(
+        'activeEditor',
+        ACTIVE_EDITOR_DEBOUNCE_MS,
+        (editor) => evaluateActiveEditorTrigger({
+            panelOpen: panel !== undefined,
+            followEnabled: vscode.workspace
+                .getConfiguration('codeNarration')
+                .get<boolean>('followActiveEditor', false),
+            currentTarget,
+            newDocUri: editor?.document.uri,
+        }),
+        (target) => void runNarration(context, target),
+    );
 }
 
 async function openFileNarration(context: vscode.ExtensionContext): Promise<void> {
@@ -457,10 +503,11 @@ async function updateRepoWatcher(context: vscode.ExtensionContext, target: Narra
             repoWatcherPrimed = true;
             return;
         }
-        if (!decision.refresh || !currentTarget) return;
-        if (repoStateDebounce) clearTimeout(repoStateDebounce);
-        const t = currentTarget;
-        repoStateDebounce = setTimeout(() => void runNarration(context, t), REPO_STATE_DEBOUNCE_MS);
+        if (!decision.refresh) return;
+        // `context` is used by the trigger's dispatch closure created in
+        // initTriggers, so we don't pass it again here.
+        void context;
+        repoStateTrigger?.fire();
     });
     if (!watcher) return;
     repoWatcher = watcher;
@@ -603,39 +650,6 @@ export function findSectionForLine<T extends SectionRangeLike>(
     if (best < 0) return undefined;
     const candidate = sections[best];
     return candidate.range.end.line >= cursorLine ? candidate : undefined;
-}
-
-function onSave(context: vscode.ExtensionContext, doc: vscode.TextDocument): void {
-    if (!panel || !currentTarget) return;
-    if (!targetMatchesSavedDoc(currentTarget, doc.uri)) return;
-    if (!readNarrateOnSave()) return;
-    if (saveDebounce) clearTimeout(saveDebounce);
-    const target = currentTarget;
-    saveDebounce = setTimeout(() => void runNarration(context, target), SAVE_DEBOUNCE_MS);
-}
-
-function onActiveEditorChange(
-    context: vscode.ExtensionContext,
-    editor: vscode.TextEditor | undefined,
-): void {
-    if (!panel) return;
-    const followEnabled = vscode.workspace
-        .getConfiguration('codeNarration')
-        .get<boolean>('followActiveEditor', false);
-    const doc = editor?.document;
-    const allow = shouldFollowEditor({
-        newDocUri: doc?.uri,
-        newDocScheme: doc?.uri.scheme,
-        currentTarget,
-        followEnabled,
-    });
-    if (!allow) return;
-    if (activeEditorDebounce) clearTimeout(activeEditorDebounce);
-    const newUri = doc!.uri;
-    activeEditorDebounce = setTimeout(
-        () => void runNarration(context, { kind: 'file', uri: newUri }),
-        ACTIVE_EDITOR_DEBOUNCE_MS,
-    );
 }
 
 interface ModelChoice extends vscode.QuickPickItem {
