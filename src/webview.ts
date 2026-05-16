@@ -791,14 +791,22 @@ function makeNonce(): string {
     return crypto.randomBytes(16).toString('base64');
 }
 
-const HTML_ESCAPE_RE = /[&<>"]/g;
+// Encode every character that has a special meaning in any HTML context the
+// host may interpolate user/LLM-controlled strings into: element content,
+// double-quoted attributes, AND single-quoted attributes. The single-quote
+// mapping is defence-in-depth — no current caller emits single-quoted
+// attributes, but the function's name implies it is safe for any HTML
+// context, so a future caller wiring `title='${escapeHtml(...)}'` must not
+// silently regress to attribute injection.
+const HTML_ESCAPE_RE = /[&<>"']/g;
 const HTML_ESCAPE_MAP: Record<string, string> = {
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',
     '"': '&quot;',
+    "'": '&#39;',
 };
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
     return s.replace(HTML_ESCAPE_RE, (c) => HTML_ESCAPE_MAP[c]);
 }

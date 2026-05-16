@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
     aggregateBannerStatus,
     computeBannerStatus,
+    escapeHtml,
     isAllowedImageSrc,
     isAllowedLinkUrl,
     renderMarkdownToHtml,
@@ -314,6 +315,46 @@ describe('renderMarkdownToHtml — image exfiltration (#91)', () => {
         expect(html).not.toMatch(/\[image:/);
     });
 });
+
+describe('escapeHtml — regression for #131', () => {
+    test('encodes the five HTML-significant characters', () => {
+        expect(escapeHtml('&')).toBe('&amp;');
+        expect(escapeHtml('<')).toBe('&lt;');
+        expect(escapeHtml('>')).toBe('&gt;');
+        expect(escapeHtml('"')).toBe('&quot;');
+        expect(escapeHtml("'")).toBe('&#39;');
+    });
+
+    test("encodes single-quote so single-quoted attribute interpolation is safe", () => {
+        // The function is meant to be safe in any HTML context; a future
+        // caller using single-quoted attributes (e.g. title='${escapeHtml(x)}')
+        // must not be able to break out via a literal apostrophe.
+        const payload = "x' onmouseover='alert(1)";
+        const out = escapeHtml(payload);
+        expect(out).not.toContain("'");
+        expect(out).toContain('&#39;');
+        // The whole adversarial string is escaped end-to-end (no raw < or >).
+        expect(out).not.toMatch(/[<>"']/);
+    });
+
+    test('encodes every occurrence, not just the first', () => {
+        expect(escapeHtml("''&&<<>>\"\"")).toBe(
+            '&#39;&#39;&amp;&amp;&lt;&lt;&gt;&gt;&quot;&quot;',
+        );
+    });
+
+    test('passes through strings with no special characters unchanged', () => {
+        expect(escapeHtml('hello world 123 — éclair')).toBe('hello world 123 — éclair');
+        expect(escapeHtml('')).toBe('');
+    });
+
+    test('mixed content gets every special char encoded', () => {
+        expect(escapeHtml(`Tom & Jerry's <b>"life"</b>`)).toBe(
+            'Tom &amp; Jerry&#39;s &lt;b&gt;&quot;life&quot;&lt;/b&gt;',
+        );
+    });
+});
+
 
 describe('safeJsonForScriptElement — regression for #96', () => {
     test('round-trips ordinary JSON values unchanged in meaning', () => {
