@@ -81,7 +81,7 @@ You can also edit settings directly:
 ## Notes
 
 - The cache is keyed by `(target, content, provider, model, prompt-version)` and lives in workspaceState; switching models or editing prompt files invalidates entries naturally.
-- All `command:` URIs in the narration are restricted to `codeNarration.reveal` (jumps the editor) and `codeNarration.refresh` (re-runs the narration); nothing else can be invoked from generated content.
+- All `command:` URIs in narration markdown are restricted to `codeNarration.reveal` (jumps the editor); the only other allowed command URI is the banner's own host-generated `codeNarration.refresh` link, which is emitted directly by the host (never by the LLM) and never passes through the markdown allowlist. See `isAllowedLinkUrl` in `src/webview.ts` for the source of truth.
 - Transient stream errors (network blips, rate limits) are retried per section with exponential backoff before failing. A stream that goes idle for longer than `codeNarration.streamIdleTimeoutMs` (default 60 s) is aborted and retried.
 - Massive single symbols (thousands of lines, no nested structure) that would blow past the model's context window are split into overlapping line-range sub-chunks under `codeNarration.maxPromptTokens` (default 50 000), narrated independently, then merged into the section with line-range subheadings. The same sub-chunking applies to whole-file diff narration and to the no-symbols fallback.
 - If an Anthropic response hits `codeNarration.anthropic.maxOutputTokens`, a `_(response truncated — model hit max_tokens)_` marker is appended to the section so silent truncation is always visible.

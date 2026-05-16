@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import { isValidRange, findSectionForLine } from './extension';
+import { ensureWorkspaceTrustedForNarration, isValidRange, findSectionForLine } from './extension';
 
 type Section = { id: string; range: { start: { line: number }; end: { line: number } } };
 
@@ -181,5 +181,42 @@ describe('findSectionForLine', () => {
         // Well below 1 ms/call — binary search on 10 000 elements is ~14
         // comparisons. Generous threshold so CI doesn't flake.
         expect(perCall).toBeLessThan(1);
+    });
+});
+
+describe('ensureWorkspaceTrustedForNarration — regression for #127', () => {
+    test('returns true and does NOT warn when the workspace is trusted', () => {
+        const warnings: string[] = [];
+        const allowed = ensureWorkspaceTrustedForNarration(true, 'Open Narration', (m) => warnings.push(m));
+        expect(allowed).toBe(true);
+        expect(warnings).toEqual([]);
+    });
+
+    test('returns false and surfaces a warning when the workspace is untrusted', () => {
+        const warnings: string[] = [];
+        const allowed = ensureWorkspaceTrustedForNarration(false, 'Open Narration', (m) => warnings.push(m));
+        expect(allowed).toBe(false);
+        expect(warnings).toHaveLength(1);
+        // The warning must name the command (so the user knows which action
+        // was blocked) and explain why — the package.json untrustedWorkspaces
+        // description promises commands "stay disabled" specifically because
+        // file contents would otherwise be sent to a third-party LLM.
+        expect(warnings[0]).toContain('Open Narration');
+        expect(warnings[0]).toMatch(/untrusted|trust/i);
+        expect(warnings[0]).toMatch(/language model|LLM/i);
+    });
+
+    test('includes the supplied command label verbatim in the warning', () => {
+        const warnings: string[] = [];
+        for (const label of [
+            'Open Narration',
+            'Open Diff Narration',
+            'Open Tree Diff Narration',
+            'Refresh Narration',
+        ]) {
+            warnings.length = 0;
+            ensureWorkspaceTrustedForNarration(false, label, (m) => warnings.push(m));
+            expect(warnings[0]).toContain(label);
+        }
     });
 });

@@ -359,8 +359,17 @@ function buildTreeFileHeading(normalizedRoot: string, change: TreeChange): strin
     return `## [${label}](command:codeNarration.reveal?${args})${tag}`;
 }
 
-function escapeMarkdownPath(path: string): string {
-    return path.replace(/[\[\]`]/g, '\\$&');
+export function escapeMarkdownPath(path: string): string {
+    // Escape every character that has markdown meaning inside the contexts we
+    // wrap this output in (currently inline code spans, but the name promises
+    // a fully-safe path regardless of context):
+    //   - `\\`  so a Windows path like `src\foo` doesn't become an escape that
+    //           swallows the next character if the result is ever rendered
+    //           outside a backtick span.
+    //   - `[`/`]` so bracket-rich paths don't start a markdown link.
+    //   - `` ` `` so a path containing a backtick can't close the inline-code
+    //            span we wrap the result in.
+    return path.replace(/[\\[\]`]/g, '\\$&');
 }
 
 async function narrateFileBody(
