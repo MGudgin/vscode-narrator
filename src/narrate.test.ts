@@ -5,6 +5,7 @@ import {
     narrateDiff,
     narrateTreeDiff,
     mapWithConcurrency,
+    escapeMarkdownPath,
     NarrationEvent,
     NarrationOptions,
     NarrationSink,
@@ -995,5 +996,35 @@ describe('narrateDocument — stale unit ranges (issue #108)', () => {
         expect(chunkTexts.some((t) => t.includes('failed:'))).toBe(false);
         expect(chunkTexts.some((t) => t.includes('Illegal value for line'))).toBe(false);
         expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
+    });
+});
+
+describe('escapeMarkdownPath — regression for #132', () => {
+    test('escapes the previously-handled characters: [, ], `', () => {
+        expect(escapeMarkdownPath('a[b]c')).toBe('a\\[b\\]c');
+        expect(escapeMarkdownPath('weird`name.ts')).toBe('weird\\`name.ts');
+        expect(escapeMarkdownPath('[a`b]')).toBe('\\[a\\`b\\]');
+    });
+
+    test('escapes backslash so Windows-style paths cannot start a markdown escape', () => {
+        // Path with a literal backslash — the function name implies it returns
+        // a fully-escaped markdown-safe path. Without escaping `\`, the result
+        // could start a markdown escape sequence the next character down if a
+        // future caller used it outside an inline code span.
+        expect(escapeMarkdownPath('src\\foo.ts')).toBe('src\\\\foo.ts');
+        expect(escapeMarkdownPath('a\\b\\c')).toBe('a\\\\b\\\\c');
+    });
+
+    test('escapes backslash that precedes a bracket so the bracket stays neutralised', () => {
+        // The legacy implementation produced `src\[weird].ts` for input
+        // `src\[weird].ts`, where the inserted backslash before `[` collided
+        // with the input's own backslash. Now the input backslash is also
+        // escaped, so the bracket's escape stays effective in any context.
+        expect(escapeMarkdownPath('src\\[weird].ts')).toBe('src\\\\\\[weird\\].ts');
+    });
+
+    test('leaves a plain forward-slash path unchanged', () => {
+        expect(escapeMarkdownPath('src/plain.ts')).toBe('src/plain.ts');
+        expect(escapeMarkdownPath('')).toBe('');
     });
 });
