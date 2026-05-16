@@ -143,10 +143,16 @@ describe('isAllowedLinkUrl', () => {
         ).toBe(true);
     });
 
-    test('permits the codeNarration.refresh command URI', () => {
-        expect(isAllowedLinkUrl('command:codeNarration.refresh')).toBe(true);
-        expect(isAllowedLinkUrl('COMMAND:codeNarration.refresh')).toBe(true);
-        expect(isAllowedLinkUrl('command:codeNarration.refresh?%5B%5D')).toBe(true);
+    test('rejects the codeNarration.refresh command URI in markdown links (#130)', () => {
+        // refresh is on the webview's enableCommandUris list so the banner's
+        // host-generated <a> can fire it, but the banner is NOT routed through
+        // markdown-it / validateLink — so LLM-emitted markdown links to
+        // refresh must be downgraded to plain text to prevent an
+        // attacker-influenced narration from re-triggering a refresh on user
+        // click.
+        expect(isAllowedLinkUrl('command:codeNarration.refresh')).toBe(false);
+        expect(isAllowedLinkUrl('COMMAND:codeNarration.refresh')).toBe(false);
+        expect(isAllowedLinkUrl('command:codeNarration.refresh?%5B%5D')).toBe(false);
     });
 
     test('rejects any other command: URI', () => {
@@ -157,9 +163,10 @@ describe('isAllowedLinkUrl', () => {
         // Reveal without an args payload (no `?`) is also rejected — the real
         // command always carries encoded args, so the bare form is suspicious.
         expect(isAllowedLinkUrl('command:codeNarration.reveal')).toBe(false);
-        // Other codeNarration.* commands must NOT be confused with refresh.
+        // Other codeNarration.* commands must NOT be confused with reveal.
         expect(isAllowedLinkUrl('command:codeNarration.somethingElse')).toBe(false);
         expect(isAllowedLinkUrl('command:codeNarration.refreshOther')).toBe(false);
+        expect(isAllowedLinkUrl('command:codeNarration.revealOther')).toBe(false);
     });
 
     test('rejects file: URIs (clickable info disclosure)', () => {
@@ -204,6 +211,21 @@ describe('renderMarkdownToHtml — regression for #68/#69', () => {
         const md = '[Section](command:codeNarration.reveal?%5B%22file%3A%2F%2F%2Fa%22%5D)';
         const html = renderMarkdownToHtml(md);
         expect(html).toMatch(/href="command:codeNarration\.reveal/i);
+    });
+
+    test('LLM-emitted command:codeNarration.refresh links are downgraded to plain text (#130)', () => {
+        // refresh remains on enableCommandUris so the banner's host-generated
+        // refresh link works, but LLM-controlled markdown must not be able to
+        // emit a clickable refresh link that re-triggers narration on user
+        // click. validateLink now rejects refresh URIs.
+        for (const md of [
+            '[click](command:codeNarration.refresh)',
+            '[click](command:codeNarration.refresh?%5B%5D)',
+            '[click](COMMAND:codeNarration.refresh)',
+        ]) {
+            const html = renderMarkdownToHtml(md);
+            expect(html).not.toMatch(/href="[^"]*codeNarration\.refresh/i);
+        }
     });
 });
 

@@ -24,8 +24,14 @@ const md = new MarkdownIt({ html: false, linkify: false, breaks: false });
  * Rejected (downgraded to plain text by markdown-it):
  * - Any other `command:` URI — would otherwise execute arbitrary VS Code
  *   commands (terminal-send, settings, file open, etc.) on click.
- *   The webview also runs with `enableCommandUris: ['codeNarration.reveal']`,
- *   so a renderer regression here still cannot fire foreign commands.
+ *   The webview also runs with `enableCommandUris: ['codeNarration.reveal',
+ *   'codeNarration.refresh']`, so a renderer regression here still cannot
+ *   fire foreign commands. Note `codeNarration.refresh` is intentionally
+ *   NOT on this allowlist even though it is on `enableCommandUris`: the
+ *   banner's Refresh link is host-generated HTML (see `banner` in this file),
+ *   not markdown, so it bypasses `validateLink` and continues to work. This
+ *   prevents an LLM-emitted `[click here](command:codeNarration.refresh)`
+ *   from triggering a re-narration on user click (#130).
  * - `file:` — clickable disclosure of any file the VS Code process can read.
  * - `vscode:` — pivots through other installed extensions' URL handlers.
  */
@@ -33,7 +39,6 @@ export function isAllowedLinkUrl(url: string): boolean {
     if (/^https?:/i.test(url)) return true;
     if (/^mailto:/i.test(url)) return true;
     if (/^command:codeNarration\.reveal\?/i.test(url)) return true;
-    if (/^command:codeNarration\.refresh(?:$|\?)/i.test(url)) return true;
     return false;
 }
 
