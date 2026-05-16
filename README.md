@@ -114,6 +114,88 @@ npm run compile   # type-check + lint + esbuild bundle
 npm run package   # produces code-narration-<version>.vsix
 ```
 
+## Contributing
+
+Bug reports, feature ideas, and PRs are all welcome.
+
+### Where to file things
+
+- **Bugs and feature requests**: open an issue at
+  https://github.com/MGudgin/vscode-narrator/issues. Include the VS Code
+  version, the extension version, the provider (`vscodeLm` or `anthropic`),
+  and a minimal repro when relevant.
+- **Picking something up**: the
+  [`good first issue`](https://github.com/MGudgin/vscode-narrator/labels/good%20first%20issue)
+  label marks scoped, self-contained tasks suitable for a first contribution.
+
+### Dev setup
+
+1. Clone the repo and `cd` in.
+2. `npm install` — pulls TypeScript, ESLint, esbuild, vitest, and the
+   VS Code test harness.
+3. Open the folder in VS Code and press <kbd>F5</kbd> to launch an Extension
+   Development Host with the extension loaded.
+
+### Build / test / lint commands
+
+| Command | What it does |
+| --- | --- |
+| `npm run check-types` | `tsc --noEmit` against `tsconfig.json` |
+| `npm run lint` | ESLint over `src/` |
+| `npm test` | Vitest unit tests (one-shot) |
+| `npm run test:watch` | Vitest in watch mode |
+| `npm run test:integration` | VS Code integration tests via `@vscode/test-electron` |
+| `npm run compile` | type-check + lint + esbuild bundle into `out/` |
+| `npm run watch` | esbuild in watch mode (used during F5 debugging) |
+| `npm run package` | Produces `code-narration-<version>.vsix` via `vsce` |
+
+The integration suite spins up a real VS Code instance, so the first run can
+take a minute while `@vscode/test-electron` downloads a matching VS Code
+build. Subsequent runs are much faster.
+
+### Branching and PR flow
+
+1. Branch from `main` — `git switch -c <topic>` (the convention is short,
+   hyphen-separated topic names, optionally prefixed by an issue number,
+   e.g. `32-commit-diff` or `chat-participant`).
+2. Make your change. Keep commits focused; a single PR can contain several
+   if the steps are logically separate.
+3. Run the local gates before pushing:
+
+   ```bash
+   npm run check-types && npm run lint && npm test
+   # and, if you touched anything UI-shaped:
+   npm run compile
+   ```
+
+4. Push and open a PR with `gh pr create` (or via the GitHub UI). The CI
+   workflow runs the same gates; PRs merge when they pass.
+
+### Commit style
+
+- Use [Conventional Commits](https://www.conventionalcommits.org/) prefixes
+  (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`) and reference
+  the issue when there is one — e.g. `feat(#32): narrate an arbitrary commit's diff`.
+- Keep subject lines under ~72 chars; put detail in the body.
+- When a change was co-authored with Copilot (CLI or Coding Agent), include
+  the trailer at the end of the commit message:
+
+  ```text
+  Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+  ```
+
+### Project layout
+
+- `src/` — extension source (TypeScript).
+  - `extension.ts` — command registration and lifecycle.
+  - `narrate.ts` — file / diff / tree-diff narration pipeline.
+  - `diff.ts` — wrapper around `vscode.git` for diff fetching.
+  - `prompt.ts` — system prompts and user prompt builders.
+  - `llm/` — provider adapters (VS Code LM + Anthropic).
+- `src/*.test.ts` — vitest unit tests, colocated with each module.
+- `test/` — VS Code integration tests (run via `@vscode/test-electron`).
+- `media/` — assets (icons, screenshots) referenced from `README.md`.
+
 ## License
 
 MIT — see `LICENSE`.
