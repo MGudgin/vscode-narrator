@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Code Narration extension icon.
+
+  Concept: an open book whose right page dissolves into a streaming
+  speech-bubble tail, evoking "source on the left, narration on the
+  right" — the central UX of the extension. Drawn against a deep
+  indigo gradient so the glyph reads at 32×32 in the marketplace
+  search list.
+
+  Rendered to icon.png at 128×128 via `node scripts/build-icon.mjs`.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f1a4d"/>
+      <stop offset="100%" stop-color="#0a0826"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fdf6e3"/>
+      <stop offset="100%" stop-color="#e7dec0"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f7c948"/>
+      <stop offset="100%" stop-color="#e89c1f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="128" height="128" rx="22" ry="22" fill="url(#bg)"/>
+
+  <!-- Open book: two trapezoidal pages meeting at the spine -->
+  <g stroke="#0a0826" stroke-width="2" stroke-linejoin="round">
+    <path d="M16 38 L60 32 L60 100 L16 96 Z" fill="url(#page)"/>
+    <path d="M68 32 L112 38 L112 96 L68 100 Z" fill="url(#page)"/>
+    <!-- Spine -->
+    <path d="M60 32 L60 100 L64 102 L68 100 L68 32 L64 30 Z" fill="#3a2f8a"/>
+  </g>
+
+  <!-- Lines of "code" on the left page -->
+  <g fill="#3a2f8a" opacity="0.85">
+    <rect x="22" y="46" width="32" height="3" rx="1.5"/>
+    <rect x="22" y="54" width="26" height="3" rx="1.5"/>
+    <rect x="22" y="62" width="30" height="3" rx="1.5"/>
+    <rect x="22" y="70" width="20" height="3" rx="1.5"/>
+    <rect x="22" y="78" width="28" height="3" rx="1.5"/>
+    <rect x="22" y="86" width="22" height="3" rx="1.5"/>
+  </g>
+
+  <!-- "Narration" on the right page: text lines that flow into a speech tail -->
+  <g fill="#3a2f8a">
+    <rect x="74" y="46" width="30" height="3" rx="1.5"/>
+    <rect x="74" y="54" width="34" height="3" rx="1.5"/>
+    <rect x="74" y="62" width="28" height="3" rx="1.5"/>
+    <rect x="74" y="70" width="32" height="3" rx="1.5"/>
+  </g>
+
+  <!-- Streaming dot accent on the right page, mirroring the in-pane status dot -->
+  <circle cx="104" cy="86" r="5" fill="url(#accent)" stroke="#0a0826" stroke-width="1.5"/>
+
+  <!-- Subtle glow / shadow under the book -->
+  <ellipse cx="64" cy="108" rx="38" ry="4" fill="#000" opacity="0.35"/>
+</svg>
