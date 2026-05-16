@@ -3,6 +3,9 @@ import * as vscode from 'vscode';
 import {
     getDiff,
     getTreeDiff,
+    getFileAtRef,
+    listRecentCommits,
+    summarizeCommit,
     findRepoRootForUri,
     listRepoRoots,
     watchRepoState,
@@ -45,6 +48,9 @@ interface FakeRepoOpts {
     fileDiffErrors?: Set<string>;
     showThrows?: boolean;
     diffWithRefThrows?: Error;
+    /** Per-fsPath map keyed by `<base>..<head>` -> unified diff. */
+    diffBetweenFile?: Map<string, string>;
+    log?: { hash: string; message: string; authorName?: string; authorDate?: Date }[];
 }
 
 function makeFakeRepo(opts: FakeRepoOpts) {
@@ -68,9 +74,18 @@ function makeFakeRepo(opts: FakeRepoOpts) {
             if (fileDiffErrors.has(path)) throw new Error(`forced error for ${path}`);
             return fileDiffs.get(path) ?? '';
         },
+        async diffBetween(ref1: string, ref2: string, path?: string) {
+            if (path === undefined) return opts.changes ?? [];
+            const key = `${ref1}..${ref2}:${path}`;
+            if (opts.diffBetweenFile?.has(key)) return opts.diffBetweenFile.get(key)!;
+            return '';
+        },
         async show(_ref: string, _path: string) {
             if (opts.showThrows) throw new Error('not found in base');
             return '';
+        },
+        async log(_options?: { maxEntries?: number }) {
+            return opts.log ?? [];
         },
         fireStateChange(): void {
             for (const cb of listeners) cb();
@@ -172,6 +187,102 @@ describe('getDiff', () => {
         });
         installFakeGitExtension({ isActive: false, repos: [repo], repoForUri: () => repo });
         await expect(getDiff(uri, 'HEAD')).resolves.toEqual({ kind: 'modified', unifiedDiff: 'diff' });
+    });
+
+    test('uses diffBetween when a headRef is supplied', async () => {
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const repo = makeFakeRepo({
+            rootUri: vscode.Uri.parse('file:///r') as unknown as vscode.Uri,
+            diffBetweenFile: new Map([[`abc^..abc:${uri.fsPath}`, '@@ commit diff']]),
+        });
+        installFakeGitExtension({ repos: [repo], repoForUri: () => repo });
+        await expect(getDiff(uri, 'abc^', 'abc')).resolves.toEqual({
+            kind: 'modified',
+            unifiedDiff: '@@ commit diff',
+        });
+    });
+
+    test('returns noChanges from diffBetween when the file is unchanged across the commit pair', async () => {
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const repo = makeFakeRepo({
+            rootUri: vscode.Uri.parse('file:///r') as unknown as vscode.Uri,
+        });
+        installFakeGitExtension({ repos: [repo], repoForUri: () => repo });
+        await expect(getDiff(uri, 'abc^', 'abc')).resolves.toEqual({ kind: 'noChanges' });
+    });
+
+    test('headRef-mode wraps diffBetween failures with both refs in the message', async () => {
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const repo = makeFakeRepo({
+            rootUri: vscode.Uri.parse('file:///r') as unknown as vscode.Uri,
+        });
+        // Override diffBetween to throw via monkey patch.
+        repo.diffBetween = async () => {
+            throw new Error('forced commit-diff failure');
+        };
+        installFakeGitExtension({ repos: [repo], repoForUri: () => repo });
+        await expect(getDiff(uri, 'abc^', 'abc')).rejects.toThrow(/git diff failed for "abc\^\.\.abc".*forced/);
+    });
+});
+
+describe('getFileAtRef', () => {
+    test('returns the content via repo.show', async () => {
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const repo = makeFakeRepo({ rootUri: vscode.Uri.parse('file:///r') as unknown as vscode.Uri });
+        // Override show to return deterministic content.
+        repo.show = async (_ref: string, p: string) => `content-at-ref-for-${p}`;
+        installFakeGitExtension({ repos: [repo], repoForUri: () => repo });
+        await expect(getFileAtRef(uri, 'abc')).resolves.toBe(`content-at-ref-for-${uri.fsPath}`);
+    });
+
+    test('returns undefined when show throws (file absent at ref)', async () => {
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const repo = makeFakeRepo({
+            rootUri: vscode.Uri.parse('file:///r') as unknown as vscode.Uri,
+            showThrows: true,
+        });
+        installFakeGitExtension({ repos: [repo], repoForUri: () => repo });
+        await expect(getFileAtRef(uri, 'abc')).resolves.toBeUndefined();
+    });
+});
+
+describe('listRecentCommits', () => {
+    test('summarizes the first line of each commit message and abbreviates the hash', async () => {
+        const repo = makeFakeRepo({
+            rootUri: vscode.Uri.parse('file:///r') as unknown as vscode.Uri,
+            log: [
+                { hash: '0123456789abcdef', message: 'Add feature X\n\nLonger detail\nspanning lines.' },
+                { hash: 'fedcba9876543210', message: 'fix: handle null case', authorName: 'Alice' },
+            ],
+        });
+        installFakeGitExtension({ repos: [repo], repoForUri: () => repo });
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        const out = await listRecentCommits(uri, 50);
+        expect(out).toHaveLength(2);
+        expect(out[0]).toMatchObject({ hash: '0123456789abcdef', abbrSha: '0123456', subject: 'Add feature X' });
+        expect(out[1]).toMatchObject({ hash: 'fedcba9876543210', abbrSha: 'fedcba9', subject: 'fix: handle null case', authorName: 'Alice' });
+    });
+
+    test('returns an empty array when no repository matches the uri', async () => {
+        installFakeGitExtension({ repoForUri: () => null });
+        const uri = vscode.Uri.parse('file:///r/a.ts') as unknown as vscode.Uri;
+        await expect(listRecentCommits(uri, 50)).resolves.toEqual([]);
+    });
+});
+
+describe('summarizeCommit', () => {
+    test('takes the first line of the message verbatim, trimmed', () => {
+        const out = summarizeCommit({ hash: 'aabbccddeeff0011', message: '  feat: thing\n\nbody  ' });
+        expect(out).toEqual(expect.objectContaining({
+            hash: 'aabbccddeeff0011',
+            abbrSha: 'aabbccd',
+            subject: 'feat: thing',
+        }));
+    });
+
+    test('handles empty / missing messages without crashing', () => {
+        const out = summarizeCommit({ hash: '1234567', message: '' });
+        expect(out.subject).toBe('');
     });
 });
 

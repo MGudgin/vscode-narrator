@@ -4,7 +4,8 @@ import { normalizeRoot } from './paths';
 export type NarrationTarget =
     | { kind: 'file'; uri: vscode.Uri }
     | { kind: 'diff'; uri: vscode.Uri; baseRef: string }
-    | { kind: 'tree'; repoRoot: vscode.Uri; baseRef: string };
+    | { kind: 'tree'; repoRoot: vscode.Uri; baseRef: string }
+    | { kind: 'commitDiff'; uri: vscode.Uri; baseRef: string; headRef: string; abbrSha: string; subject: string };
 
 export function targetMatchesSavedDoc(target: NarrationTarget, savedUri: vscode.Uri): boolean {
     switch (target.kind) {
@@ -13,6 +14,10 @@ export function targetMatchesSavedDoc(target: NarrationTarget, savedUri: vscode.
             return target.uri.toString() === savedUri.toString();
         case 'tree':
             return isUriUnder(target.repoRoot, savedUri);
+        case 'commitDiff':
+            // Pinned to a fixed commit. Saving the working-tree copy must not
+            // retrigger narration — the commit hasn't changed.
+            return false;
     }
 }
 
@@ -32,6 +37,10 @@ export function targetMatchesSavedDoc(target: NarrationTarget, savedUri: vscode.
 export function isAllowedRevealUri(uri: vscode.Uri, target: NarrationTarget | undefined): boolean {
     if (uri.scheme !== 'file' && uri.scheme !== 'untitled') return false;
     if (!target) return false;
+    if (target.kind === 'commitDiff') {
+        // Reveal links resolve against the working-tree copy of the same path.
+        return target.uri.toString() === uri.toString();
+    }
     return targetMatchesSavedDoc(target, uri);
 }
 
@@ -67,6 +76,7 @@ export function targetTitle(target: NarrationTarget): string {
         case 'file': return `Narration: ${shortName(target.uri)}`;
         case 'diff': return `Diff (${target.baseRef}): ${shortName(target.uri)}`;
         case 'tree': return `Tree diff (${target.baseRef}): ${shortName(target.repoRoot)}`;
+        case 'commitDiff': return `Commit ${target.abbrSha}: ${shortName(target.uri)}`;
     }
 }
 
@@ -75,6 +85,10 @@ export function targetBannerLabel(target: NarrationTarget): string {
         case 'file': return 'Full file';
         case 'diff': return `Diff vs ${target.baseRef}`;
         case 'tree': return `Tree diff vs ${target.baseRef}`;
+        case 'commitDiff': {
+            const subject = target.subject ? `: ${target.subject}` : '';
+            return `Diff in ${target.abbrSha}${subject}`;
+        }
     }
 }
 

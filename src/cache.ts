@@ -188,6 +188,27 @@ export function diffKey(
     ]);
 }
 
+export function commitDiffKey(
+    uri: vscode.Uri,
+    unifiedDiff: string,
+    baseRef: string,
+    headRef: string,
+    info: ProviderInfo,
+    personaCacheTag: string = DEFAULT_PERSONA_CACHE_TAG,
+): string {
+    return hashKey([
+        'commitDiff',
+        uri.toString(),
+        unifiedDiff,
+        baseRef,
+        headRef,
+        info.kind,
+        info.model,
+        String(PROMPT_VERSION),
+        personaCacheTag,
+    ]);
+}
+
 export function treeDiffKey(
     repoRoot: vscode.Uri,
     combinedDiff: string,

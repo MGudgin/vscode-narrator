@@ -47,6 +47,12 @@
         "icon": "$(git-compare)"
       },
       {
+        "command": "codeNarration.openCommitDiff",
+        "title": "Narrate Commit Diff…",
+        "category": "Code Narration",
+        "icon": "$(git-commit)"
+      },
+      {
         "command": "codeNarration.openTreeDiff",
         "title": "Open Tree Diff Narration",
         "category": "Code Narration",
@@ -117,6 +123,10 @@
       "scm/title": [
         {
           "command": "codeNarration.openTreeDiff",
+          "group": "navigation"
+        },
+        {
+          "command": "codeNarration.openCommitDiff",
           "group": "navigation"
         }
       ],

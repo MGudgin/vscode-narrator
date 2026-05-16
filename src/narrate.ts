@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit, getNarrationUnits } from './symbols';
-import { DiffResult, TreeChange, TreeDiffResult, getDiff, getTreeDiff } from './diff';
-import { NarrationCache, fileKey, sectionKeyFromHash, hashContent, diffKey, treeDiffKey } from './cache';
+import { DiffResult, TreeChange, TreeDiffResult, getDiff, getTreeDiff, getFileAtRef } from './diff';
+import { NarrationCache, fileKey, sectionKeyFromHash, hashContent, diffKey, commitDiffKey, treeDiffKey } from './cache';
+import { CommitFileDocument } from './commitDoc';
 import {
     MapWithConcurrencyError,
     MapWithConcurrencyResult,
@@ -86,8 +87,14 @@ export interface NarrationOptions {
     cache: NarrationCache;
     providerInfo: ProviderInfo;
     fetchUnits?: (doc: vscode.TextDocument) => Promise<NarrationUnit[]>;
-    fetchDiff?: (uri: vscode.Uri, baseRef: string) => Promise<DiffResult>;
+    fetchDiff?: (uri: vscode.Uri, baseRef: string, headRef?: string) => Promise<DiffResult>;
     fetchTreeDiff?: (repoRoot: vscode.Uri, baseRef: string) => Promise<TreeDiffResult>;
+    /**
+     * Override for commit-diff content fetching. Used by tests to avoid
+     * calling the real `vscode.git` extension; production code defaults to
+     * `getFileAtRef` from `./diff`.
+     */
+    fetchFileAtRef?: (uri: vscode.Uri, ref: string) => Promise<string | undefined>;
     concurrency?: number;
     maxPromptTokens?: number;
     streamIdleTimeoutMs?: number;
@@ -200,6 +207,192 @@ export async function narrateDiff(
             return;
         }
     }
+}
+
+export async function narrateCommitDiff(
+    uri: vscode.Uri,
+    baseRef: string,
+    headRef: string,
+    provider: NarrationProvider,
+    token: vscode.CancellationToken,
+    sink: NarrationSink,
+    options: NarrationOptions,
+): Promise<void> {
+    const snapshot = configFrom(options);
+    options = { ...options, configSnapshot: snapshot };
+    const fetchDiff = options.fetchDiff ?? getDiff;
+    const fetchContent = options.fetchFileAtRef ?? getFileAtRef;
+
+    const diffResult = await fetchDiff(uri, baseRef, headRef);
+    if (token.isCancellationRequested) return;
+
+    switch (diffResult.kind) {
+        case 'noRepo':
+            throw new Error('This file is not in a git repository.');
+        case 'noChanges':
+            sink({
+                kind: 'init',
+                sections: [{
+                    id: 'main',
+                    bodyMarkdown: `## No changes\n\nThis file is identical between \`${baseRef}\` and \`${headRef}\`.`,
+                }],
+            });
+            sink({ kind: 'done' });
+            return;
+        case 'newFile':
+            // The base ref didn't have the file — it's new in this commit.
+            // We still narrate, using the commit's content as the source.
+            break;
+        case 'modified':
+            break;
+    }
+
+    const content = (await fetchContent(uri, headRef)) ?? '';
+    if (token.isCancellationRequested) return;
+
+    const doc = new CommitFileDocument(uri, guessLanguageId(uri), content);
+
+    if (diffResult.kind === 'newFile') {
+        const unifiedDiff = synthesizeAdditionDiff(uri, content);
+        await runCommitDiffSection({
+            doc,
+            uri,
+            baseRef,
+            headRef,
+            unifiedDiff,
+            provider,
+            token,
+            sink,
+            options,
+            snapshot,
+            bannerNote: `> _Newly added file in \`${headRef}\` — no base content vs \`${baseRef}\`._`,
+        });
+        return;
+    }
+
+    await runCommitDiffSection({
+        doc,
+        uri,
+        baseRef,
+        headRef,
+        unifiedDiff: diffResult.unifiedDiff,
+        provider,
+        token,
+        sink,
+        options,
+        snapshot,
+    });
+}
+
+interface RunCommitDiffSectionArgs {
+    doc: vscode.TextDocument;
+    uri: vscode.Uri;
+    baseRef: string;
+    headRef: string;
+    unifiedDiff: string;
+    provider: NarrationProvider;
+    token: vscode.CancellationToken;
+    sink: NarrationSink;
+    options: NarrationOptions;
+    snapshot: NarrationConfigSnapshot;
+    bannerNote?: string;
+}
+
+async function runCommitDiffSection(args: RunCommitDiffSectionArgs): Promise<void> {
+    const {
+        doc,
+        uri,
+        baseRef,
+        headRef,
+        unifiedDiff,
+        provider,
+        token,
+        sink,
+        options,
+        snapshot,
+        bannerNote,
+    } = args;
+    const persona = resolvePersona(options);
+    const key = commitDiffKey(uri, unifiedDiff, baseRef, headRef, options.providerInfo, persona.cacheTag);
+    if (!options.skipCache) {
+        const cached = await options.cache.get(key);
+        if (cached) {
+            sink({
+                kind: 'init',
+                sections: [{ id: 'cached', bodyMarkdown: cached }],
+                fromCache: true,
+            });
+            sink({ kind: 'done' });
+            return;
+        }
+    }
+    const initSections: SectionInit[] = [];
+    if (bannerNote) initSections.push({ id: 'banner', bodyMarkdown: bannerNote });
+    initSections.push({ id: 'main' });
+    sink({ kind: 'init', sections: initSections });
+
+    const maxPromptTokens = resolveMaxPromptTokens(options, snapshot);
+    const idleTimeoutMs = resolveIdleTimeoutMs(options, snapshot);
+    const acc = await streamWholeFileOrChunked(
+        doc,
+        provider,
+        token,
+        sink,
+        persona.prompts.diffSystem,
+        buildDiffUserPrompt(doc, `${baseRef}..${headRef}`, unifiedDiff),
+        (startLine, endLine) =>
+            buildDiffUserPromptForRange(doc, `${baseRef}..${headRef}`, unifiedDiff, startLine, endLine),
+        maxPromptTokens,
+        idleTimeoutMs,
+    );
+    if (token.isCancellationRequested) return;
+    sink({ kind: 'sectionDone', sectionId: 'main' });
+    await options.cache.set(key, fixupLinks(acc, uri));
+    sink({ kind: 'done' });
+}
+
+/**
+ * Best-effort languageId guess from a file path's extension. Falls back to
+ * `'plaintext'`. Kept small on purpose — symbol-aware narration is not in
+ * play for commit-diff (we only feed content to the diff prompt builders).
+ */
+export function guessLanguageId(uri: vscode.Uri): string {
+    const p = uri.fsPath || uri.path;
+    const ext = p.split('.').pop()?.toLowerCase() ?? '';
+    switch (ext) {
+        case 'ts': case 'tsx': return 'typescript';
+        case 'js': case 'jsx': case 'mjs': case 'cjs': return 'javascript';
+        case 'py': return 'python';
+        case 'go': return 'go';
+        case 'rs': return 'rust';
+        case 'java': return 'java';
+        case 'kt': case 'kts': return 'kotlin';
+        case 'swift': return 'swift';
+        case 'rb': return 'ruby';
+        case 'cs': return 'csharp';
+        case 'cpp': case 'cc': case 'cxx': case 'hpp': case 'hh': return 'cpp';
+        case 'c': case 'h': return 'c';
+        case 'json': return 'json';
+        case 'yml': case 'yaml': return 'yaml';
+        case 'md': return 'markdown';
+        case 'sh': case 'bash': return 'shellscript';
+        case 'html': case 'htm': return 'html';
+        case 'css': return 'css';
+        default: return 'plaintext';
+    }
+}
+
+/**
+ * Build a minimal unified-diff representation for a newly added file at
+ * `headRef`, treating the base as empty. Used so commit-diff narration of
+ * an addition still has a "diff" to narrate (the whole file body) rather
+ * than falling through to noChanges.
+ */
+function synthesizeAdditionDiff(uri: vscode.Uri, content: string): string {
+    const rel = vscode.workspace.asRelativePath(uri);
+    const lines = content.split('\n');
+    const header = `--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n`;
+    return header + lines.map((l) => `+${l}`).join('\n') + (content.endsWith('\n') ? '' : '\n\\ No newline at end of file\n');
 }
 
 export async function narrateTreeDiff(

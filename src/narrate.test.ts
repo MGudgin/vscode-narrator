@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
     narrateDocument,
     narrateDiff,
+    narrateCommitDiff,
     narrateTreeDiff,
     mapWithConcurrency,
     escapeMarkdownPath,
@@ -10,7 +11,7 @@ import {
     NarrationOptions,
     NarrationSink,
 } from './narrate';
-import { NarrationCache, fileKey, sectionKey, diffKey, treeDiffKey } from './cache';
+import { NarrationCache, fileKey, sectionKey, diffKey, commitDiffKey, treeDiffKey } from './cache';
 import { DEFAULT_MAX_PROMPT_TOKENS } from './chunking';
 import { NarrationProvider, ProviderInfo } from './llm/index';
 import { NarrationUnit } from './symbols';
@@ -568,6 +569,131 @@ describe('narrateDiff', () => {
         // Exactly one provider call when the prompt fits.
         expect(calls).toHaveLength(1);
         expect(calls[0].userPrompt).not.toContain('sub-chunk');
+    });
+});
+
+describe('narrateCommitDiff', () => {
+    const uri = vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri;
+
+    test('throws on noRepo', async () => {
+        const { options } = makeOptions({
+            fetchDiff: async () => ({ kind: 'noRepo' } as DiffResult),
+            fetchFileAtRef: async () => undefined,
+        });
+        const { sink } = collectSink();
+        await expect(
+            narrateCommitDiff(uri, 'abc^', 'abc', chunkProvider([]), liveToken(), sink, options),
+        ).rejects.toThrow(/not in a git repository/);
+    });
+
+    test('emits "No changes" when the file is unchanged in the commit', async () => {
+        const { options } = makeOptions({
+            fetchDiff: async () => ({ kind: 'noChanges' } as DiffResult),
+            fetchFileAtRef: async () => 'content\n',
+        });
+        const calls: ProviderCall[] = [];
+        const { sink, events } = collectSink();
+        await narrateCommitDiff(uri, 'abc^', 'abc', chunkProvider([], calls), liveToken(), sink, options);
+        expect(calls).toHaveLength(0);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.sections[0].bodyMarkdown).toMatch(/No changes/);
+        expect(init.sections[0].bodyMarkdown).toContain('abc^');
+        expect(init.sections[0].bodyMarkdown).toContain('abc');
+    });
+
+    test('narrates the diff using content fetched from the commit, not the working tree', async () => {
+        const commitContent = 'commit-side-content\nfrom-the-commit\n';
+        const diff: DiffResult = { kind: 'modified', unifiedDiff: '@@ -1 +1 @@\n-old\n+commit-side-content' };
+        const seenContent: string[] = [];
+        const { options, cache } = makeOptions({
+            fetchDiff: async () => diff,
+            fetchFileAtRef: async (_uri, ref) => {
+                seenContent.push(ref);
+                return commitContent;
+            },
+        });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['## narration'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateCommitDiff(uri, 'abc^', 'abc', provider, liveToken(), sink, options);
+
+        expect(seenContent).toEqual(['abc']);
+        expect(calls).toHaveLength(1);
+        // Prompt uses the commit's content, not the (unset) working tree.
+        expect(calls[0].userPrompt).toContain('commit-side-content');
+        expect(calls[0].userPrompt).toContain('abc^..abc');
+        expect(events.some((e) => e.kind === 'sectionDone')).toBe(true);
+
+        // Cache key includes both baseRef and headRef.
+        const cached = await cache.get(commitDiffKey(uri, diff.unifiedDiff, 'abc^', 'abc', providerInfo));
+        expect(cached).toBe('## narration');
+    });
+
+    test('cache key distinguishes commits with the same per-file diff', async () => {
+        const diff: DiffResult = { kind: 'modified', unifiedDiff: '@@ -1 +1 @@\n-x\n+y' };
+        const { cache } = makeOptions();
+        const optsA = makeOptions({
+            fetchDiff: async () => diff,
+            fetchFileAtRef: async () => 'y\n',
+        });
+        const optsB = makeOptions({
+            fetchDiff: async () => diff,
+            fetchFileAtRef: async () => 'y\n',
+        });
+        // Distinct caches per call; we're asserting key inequality.
+        const keyA = commitDiffKey(uri, diff.unifiedDiff, 'aaaaaaa^', 'aaaaaaa', providerInfo);
+        const keyB = commitDiffKey(uri, diff.unifiedDiff, 'bbbbbbb^', 'bbbbbbb', providerInfo);
+        expect(keyA).not.toBe(keyB);
+
+        // Pre-populate first cache with a key from commit A; narrating commit B
+        // must NOT hit it.
+        await optsA.cache.set(keyA, 'A-cached');
+        await optsB.cache.set(keyB, 'B-cached');
+
+        const { sink, events } = collectSink();
+        await narrateCommitDiff(uri, 'bbbbbbb^', 'bbbbbbb', chunkProvider([]), liveToken(), sink, optsB.options);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.fromCache).toBe(true);
+        expect(init.sections[0].bodyMarkdown).toBe('B-cached');
+        // The unused-suppression below appeases ts-unused-imports rules if any.
+        expect(cache).toBeDefined();
+    });
+
+    test('newFile case narrates an additions-only diff with a banner', async () => {
+        const { options } = makeOptions({
+            fetchDiff: async () => ({ kind: 'newFile' } as DiffResult),
+            fetchFileAtRef: async () => 'first\nsecond\n',
+        });
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['added.'], calls);
+        const { sink, events } = collectSink();
+
+        await narrateCommitDiff(uri, 'abc^', 'abc', provider, liveToken(), sink, options);
+
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.sections.some((s) => s.id === 'banner' && s.bodyMarkdown?.includes('Newly added file'))).toBe(true);
+        expect(calls).toHaveLength(1);
+        // Synthesized addition diff lists the new content as `+`-prefixed lines.
+        expect(calls[0].userPrompt).toContain('+first');
+        expect(calls[0].userPrompt).toContain('+second');
+    });
+
+    test('returns a cache hit without calling the provider', async () => {
+        const diff: DiffResult = { kind: 'modified', unifiedDiff: '@@ same' };
+        const { options, cache } = makeOptions({
+            fetchDiff: async () => diff,
+            fetchFileAtRef: async () => 'x\n',
+        });
+        await cache.set(commitDiffKey(uri, diff.unifiedDiff, 'abc^', 'abc', providerInfo), 'cached commit narration');
+        const calls: ProviderCall[] = [];
+        const provider = chunkProvider(['SHOULD-NOT-APPEAR'], calls);
+        const { sink, events } = collectSink();
+        await narrateCommitDiff(uri, 'abc^', 'abc', provider, liveToken(), sink, options);
+        expect(calls).toHaveLength(0);
+        const init = events.find((e) => e.kind === 'init') as Extract<NarrationEvent, { kind: 'init' }>;
+        expect(init.fromCache).toBe(true);
+        expect(init.sections.some((s) => s.bodyMarkdown === 'cached commit narration')).toBe(true);
     });
 });
 

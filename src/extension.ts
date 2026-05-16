@@ -10,11 +10,11 @@ import {
     NarrationProvider,
     ProviderInfo,
 } from './llm/index';
-import { narrateDocument, narrateDiff, narrateTreeDiff, readNarrationConfigSnapshot } from './narrate';
+import { narrateDocument, narrateDiff, narrateCommitDiff, narrateTreeDiff, readNarrationConfigSnapshot } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
 import { NarrationTarget, targetMatchesSavedDoc, targetTitle, bannerLabelWithPersona, targetShortName, isAllowedRevealUri, shouldFollowEditor } from './target';
 import { NarrationCache } from './cache';
-import { findRepoRootForUri, listRepoRoots, watchRepoState, shouldRefreshOnRepoStateEvent } from './diff';
+import { findRepoRootForUri, listRepoRoots, listRecentCommits, watchRepoState, shouldRefreshOnRepoStateEvent } from './diff';
 import { buildNarrationSink } from './sink';
 import {
     Persona,
@@ -159,6 +159,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
     context.subscriptions.push(
         vscode.commands.registerCommand('codeNarration.open', () => openFileNarration(context)),
         vscode.commands.registerCommand('codeNarration.openDiff', () => openDiffNarration(context)),
+        vscode.commands.registerCommand('codeNarration.openCommitDiff', () => openCommitDiffNarration(context)),
         vscode.commands.registerCommand(
             'codeNarration.openTreeDiff',
             (source?: vscode.SourceControl) => openTreeDiffNarration(context, source),
@@ -294,6 +295,78 @@ async function openDiffNarration(context: vscode.ExtensionContext): Promise<void
     const baseRef = vscode.workspace.getConfiguration('codeNarration').get<string>('diffBase', 'HEAD');
     ensurePanel(context);
     await runNarration(context, { kind: 'diff', uri: editor.document.uri, baseRef });
+}
+
+interface CommitQuickPickItem extends vscode.QuickPickItem {
+    enterShaSentinel?: true;
+    commit?: { hash: string; abbrSha: string; subject: string };
+}
+
+async function openCommitDiffNarration(context: vscode.ExtensionContext): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showInformationMessage('Open a file to narrate a commit diff for.');
+        return;
+    }
+    const uri = editor.document.uri;
+    let commits;
+    try {
+        commits = await listRecentCommits(uri, 50);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Code Narration: could not list commits — ${msg}`);
+        return;
+    }
+    if (commits.length === 0) {
+        vscode.window.showInformationMessage('No commits found in the active file\'s repository.');
+        return;
+    }
+    const items: CommitQuickPickItem[] = commits.map((c) => ({
+        label: `$(git-commit) ${c.abbrSha}`,
+        description: c.subject,
+        detail: c.authorName ? `${c.authorName}${c.authorDate ? ` • ${c.authorDate.toLocaleDateString()}` : ''}` : undefined,
+        commit: { hash: c.hash, abbrSha: c.abbrSha, subject: c.subject },
+    }));
+    items.push({
+        label: '$(edit) Enter SHA…',
+        description: 'Type or paste a specific commit hash',
+        enterShaSentinel: true,
+    });
+    const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: 'Pick a commit to narrate the diff of',
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+    if (!picked) return;
+    let hash: string | undefined;
+    let abbrSha: string | undefined;
+    let subject = '';
+    if (picked.enterShaSentinel) {
+        const input = await vscode.window.showInputBox({
+            title: 'Code Narration: Commit SHA',
+            prompt: 'Commit hash (full or unique prefix) to narrate against its parent',
+            ignoreFocusOut: true,
+        });
+        if (!input) return;
+        hash = input.trim();
+        abbrSha = hash.slice(0, 7);
+    } else if (picked.commit) {
+        hash = picked.commit.hash;
+        abbrSha = picked.commit.abbrSha;
+        subject = picked.commit.subject;
+    } else {
+        return;
+    }
+    if (!hash) return;
+    ensurePanel(context);
+    await runNarration(context, {
+        kind: 'commitDiff',
+        uri,
+        baseRef: `${hash}^`,
+        headRef: hash,
+        abbrSha: abbrSha ?? hash.slice(0, 7),
+        subject,
+    });
 }
 
 async function openTreeDiffNarration(
@@ -525,6 +598,16 @@ async function runNarration(
         } else if (target.kind === 'file') {
             const doc = await vscode.workspace.openTextDocument(target.uri);
             await narrateDocument(doc, provider, token, sink, narrateOptions);
+        } else if (target.kind === 'commitDiff') {
+            await narrateCommitDiff(
+                target.uri,
+                target.baseRef,
+                target.headRef,
+                provider,
+                token,
+                sink,
+                narrateOptions,
+            );
         } else {
             const doc = await vscode.workspace.openTextDocument(target.uri);
             await narrateDiff(doc, target.baseRef, provider, token, sink, narrateOptions);

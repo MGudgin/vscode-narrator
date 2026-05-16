@@ -27,6 +27,15 @@ const treeTarget: NarrationTarget = {
     baseRef: 'origin/main',
 };
 
+const commitDiffTarget: NarrationTarget = {
+    kind: 'commitDiff',
+    uri: vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri,
+    baseRef: 'abc1234^',
+    headRef: 'abc1234',
+    abbrSha: 'abc1234',
+    subject: 'feat: add a thing',
+};
+
 describe('targetTitle', () => {
     test('uses file basename for file targets', () => {
         expect(targetTitle(fileTarget)).toBe('Narration: baz.ts');
@@ -38,6 +47,10 @@ describe('targetTitle', () => {
 
     test('uses repo folder name for tree targets', () => {
         expect(targetTitle(treeTarget)).toBe('Tree diff (origin/main): repo');
+    });
+
+    test('includes abbreviated sha for commitDiff targets', () => {
+        expect(targetTitle(commitDiffTarget)).toBe('Commit abc1234: baz.ts');
     });
 });
 
@@ -52,6 +65,15 @@ describe('targetBannerLabel', () => {
 
     test('returns "Tree diff vs <ref>" for tree targets', () => {
         expect(targetBannerLabel(treeTarget)).toBe('Tree diff vs origin/main');
+    });
+
+    test('returns "Diff in <sha>: <subject>" for commitDiff targets', () => {
+        expect(targetBannerLabel(commitDiffTarget)).toBe('Diff in abc1234: feat: add a thing');
+    });
+
+    test('omits the colon when the commitDiff target has no subject', () => {
+        const t: NarrationTarget = { ...commitDiffTarget, subject: '' };
+        expect(targetBannerLabel(t)).toBe('Diff in abc1234');
     });
 });
 
@@ -89,6 +111,11 @@ describe('targetMatchesSavedDoc', () => {
     test('tree target does not match siblings of the repo root', () => {
         const sibling = vscode.Uri.parse('file:///foo/repo-other/src/index.ts') as unknown as vscode.Uri;
         expect(targetMatchesSavedDoc(treeTarget, sibling)).toBe(false);
+    });
+
+    test('commitDiff target never matches a saved doc (it is pinned to a fixed commit)', () => {
+        const same = vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri;
+        expect(targetMatchesSavedDoc(commitDiffTarget, same)).toBe(false);
     });
 });
 
@@ -134,6 +161,13 @@ describe('isAllowedRevealUri — regression for #70', () => {
         const other = vscode.Uri.parse('file:///foo/bar/qux.ts') as unknown as vscode.Uri;
         expect(isAllowedRevealUri(same, diffTarget)).toBe(true);
         expect(isAllowedRevealUri(other, diffTarget)).toBe(false);
+    });
+
+    test('commitDiff target: matches the working-tree URI of the same path, rejects siblings', () => {
+        const same = vscode.Uri.parse('file:///foo/bar/baz.ts') as unknown as vscode.Uri;
+        const other = vscode.Uri.parse('file:///foo/bar/qux.ts') as unknown as vscode.Uri;
+        expect(isAllowedRevealUri(same, commitDiffTarget)).toBe(true);
+        expect(isAllowedRevealUri(other, commitDiffTarget)).toBe(false);
     });
 
     test('tree target: matches files inside the repo root', () => {
