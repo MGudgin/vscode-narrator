@@ -137,6 +137,15 @@
         }
       ]
     },
+    "chatParticipants": [
+      {
+        "id": "narrator",
+        "name": "narrator",
+        "fullName": "Code Narrator",
+        "description": "Ask questions about the file in your active editor.",
+        "isSticky": true
+      }
+    ],
     "configuration": {
       "title": "Code Narration",
       "properties": {

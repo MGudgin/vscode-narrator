@@ -23,6 +23,7 @@ import {
     listBuiltInPersonaIds,
     getBuiltInPersona,
 } from './personas';
+import { registerNarratorChatParticipant } from './chatParticipant';
 
 export type ProviderFactory = (
     context: vscode.ExtensionContext,
@@ -181,6 +182,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
             if (e.affectsConfiguration('codeNarration.narrateOnSave')) refreshNarrateOnSaveCache();
         }),
     );
+    registerNarratorChatParticipant(context);
     return {
         setProviderFactory(factory) {
             providerFactory = factory ?? defaultProviderFactory;

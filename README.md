@@ -29,6 +29,7 @@ You can also edit settings directly:
 - **Open Diff Narration** — the git-compare icon (or **Code Narration: Open Diff Narration**) narrates only what changed in the active file vs `codeNarration.diffBase` (default `HEAD`).
 - **Open Tree Diff Narration** — **Code Narration: Open Tree Diff Narration** narrates every changed file in the current repo vs `codeNarration.diffBase`, as one section per file plus an overview. With multiple repos in the workspace and no active editor, you'll be prompted to pick.
 - **Narrate Commit Diff…** — **Code Narration: Narrate Commit Diff…** quick-picks one of the 50 most recent commits in the active file's repo (or accepts an arbitrary SHA) and narrates *that commit's* diff for the active file, using the file's contents at that commit. Useful for code review, bisect, and onboarding to existing history.
+- **Q&A via `@narrator`** — open the **Chat** view and type `@narrator <your question>`. The participant attaches the active file (and current selection, if any) as context and answers using the chat host's selected model. Line references in the reply are clickable and reveal the matching range in the editor.
 - **Click a section heading** in the narration pane to jump the editor to that range. In tree-diff mode, sections for deleted files render as headings without a link.
 - **Cursor sync**: moving the cursor in the editor highlights the matching section in the narration pane.
 - **On save**: if the narrated file is saved, the narration re-runs (debounced). Toggle with `codeNarration.narrateOnSave`.
