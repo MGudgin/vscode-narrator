@@ -35,6 +35,30 @@ export type QuickPickResolver = <T extends vscode.QuickPickItem>(
     options: vscode.QuickPickOptions | undefined,
 ) => Promise<T | undefined>;
 
+export interface VoiceInfo {
+    name: string;
+    lang: string;
+    default?: boolean;
+    localService?: boolean;
+}
+
+export interface VoiceQuickPickItem extends vscode.QuickPickItem {
+    voiceName: string;
+}
+
+export interface PickVoiceDeps {
+    getCurrent: () => string;
+    hasNarrationPanel: () => boolean;
+    fetchVoices: () => Promise<VoiceInfo[]>;
+    showQuickPick: (
+        items: readonly VoiceQuickPickItem[],
+        options: vscode.QuickPickOptions | undefined,
+    ) => Promise<VoiceQuickPickItem | undefined>;
+    showInputBox: (options: vscode.InputBoxOptions) => Promise<string | undefined>;
+    save: (value: string) => Promise<void>;
+    showInfo: (message: string) => void;
+}
+
 export interface ExtensionApi {
     /**
      * Override how the extension obtains a language model provider. Pass `undefined`
@@ -80,6 +104,8 @@ let watchedRepoRoot: string | undefined;
 let repoWatcherPrimed = false;
 let cache: NarrationCache | undefined;
 const sectionRanges: { id: string; range: vscode.Range }[] = [];
+let cachedVoices: VoiceInfo[] = [];
+const pendingVoiceRequests: ((voices: VoiceInfo[]) => void)[] = [];
 
 const SAVE_DEBOUNCE_MS = 500;
 const SELECTION_DEBOUNCE_MS = 200;
@@ -241,21 +267,115 @@ function onSpeechConfigChange(): void {
 }
 
 async function pickVoice(): Promise<void> {
-    // The list of voices lives in the webview. Ask the user to type a name —
-    // an extension cannot enumerate Web Speech voices from the host side.
-    const cfg = vscode.workspace.getConfiguration('codeNarration.speech');
-    const current = cfg.get<string>('voice', '');
-    const value = await vscode.window.showInputBox({
-        title: 'Code Narration: Voice name',
-        prompt: 'Type a voice name as shown in the narration pane voice picker (leave empty for default).',
-        value: current,
-        ignoreFocusOut: true,
+    await pickVoiceCore({
+        getCurrent: () => vscode.workspace.getConfiguration('codeNarration.speech').get<string>('voice', ''),
+        fetchVoices: () => fetchVoicesFromWebview(),
+        hasNarrationPanel: () => panel !== undefined,
+        showQuickPick: async (items, options) => {
+            if (quickPickResolver) return quickPickResolver(items, options);
+            return vscode.window.showQuickPick(items, options);
+        },
+        showInputBox: (options) => Promise.resolve(vscode.window.showInputBox(options)).then((v) => v ?? undefined),
+        save: async (value) => {
+            const cfg = vscode.workspace.getConfiguration('codeNarration.speech');
+            await cfg.update('voice', value, vscode.ConfigurationTarget.Global);
+        },
+        showInfo: (message) => { vscode.window.showInformationMessage(message); },
     });
-    if (value === undefined) return;
-    await cfg.update('voice', value, vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage(
-        value ? `Code Narration: voice set to ${value}.` : 'Code Narration: voice cleared (using system default).',
+}
+
+/**
+ * Pure, dependency-injected core for `codeNarration.pickVoice`. Picks a voice
+ * from the webview's cached list via quick-pick; falls back to a free-text
+ * input box when the panel is closed or has not yet reported any voices.
+ */
+export async function pickVoiceCore(deps: PickVoiceDeps): Promise<void> {
+    const current = deps.getCurrent();
+    const voices = deps.hasNarrationPanel() ? await deps.fetchVoices() : [];
+    if (voices.length === 0) {
+        const value = await deps.showInputBox({
+            title: 'Code Narration: Voice name',
+            prompt: 'Open a narration to get a voice picker. Until then, type a voice name (leave empty for default).',
+            value: current,
+            ignoreFocusOut: true,
+        });
+        if (value === undefined) return;
+        await deps.save(value);
+        deps.showInfo(
+            value
+                ? `Code Narration: voice set to ${value}.`
+                : 'Code Narration: voice cleared (using system default).',
+        );
+        return;
+    }
+
+    const items: VoiceQuickPickItem[] = [
+        { label: '$(circle-slash) Default', description: 'Use the system default voice', voiceName: '' },
+        ...voices.map((v) => {
+            const tags: string[] = [];
+            if (v.default) tags.push('default');
+            if (v.localService === false) tags.push('remote');
+            const detail = tags.length > 0 ? tags.join(' • ') : undefined;
+            return {
+                label: v.name,
+                description: v.lang,
+                detail,
+                voiceName: v.name,
+                picked: v.name === current,
+            } satisfies VoiceQuickPickItem;
+        }),
+    ];
+
+    const picked = await deps.showQuickPick(items, {
+        title: 'Code Narration: Pick Voice',
+        placeHolder: 'Pick a voice for spoken narration',
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+    if (!picked) return;
+    if (picked.voiceName === current) return;
+    await deps.save(picked.voiceName);
+    deps.showInfo(
+        picked.voiceName
+            ? `Code Narration: voice set to ${picked.voiceName}.`
+            : 'Code Narration: voice cleared (using system default).',
     );
+}
+
+function fetchVoicesFromWebview(timeoutMs = 1500): Promise<VoiceInfo[]> {
+    if (!panel) return Promise.resolve([]);
+    return new Promise<VoiceInfo[]>((resolve) => {
+        let settled = false;
+        const settle = (voices: VoiceInfo[]) => {
+            if (settled) return;
+            settled = true;
+            resolve(voices);
+        };
+        pendingVoiceRequests.push((voices) => settle(voices));
+        postToWebview(panel!.webview, { kind: 'getVoices' });
+        setTimeout(() => settle(cachedVoices.slice()), timeoutMs);
+    });
+}
+
+export function normalizeVoices(raw: unknown[]): VoiceInfo[] {
+    const out: VoiceInfo[] = [];
+    const seen = new Set<string>();
+    for (const v of raw) {
+        if (!v || typeof v !== 'object') continue;
+        const r = v as { name?: unknown; lang?: unknown; default?: unknown; localService?: unknown };
+        const name = typeof r.name === 'string' ? r.name : '';
+        const lang = typeof r.lang === 'string' ? r.lang : '';
+        if (!name) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        out.push({
+            name,
+            lang,
+            default: r.default === true ? true : undefined,
+            localService: typeof r.localService === 'boolean' ? r.localService : undefined,
+        });
+    }
+    return out;
 }
 
 export function deactivate(): void {
@@ -385,6 +505,9 @@ function ensurePanel(context: vscode.ExtensionContext): void {
             repoWatcher = undefined;
             watchedRepoRoot = undefined;
             repoWatcherPrimed = false;
+            cachedVoices = [];
+            const pending = pendingVoiceRequests.splice(0);
+            for (const resolve of pending) resolve([]);
         },
         null,
         context.subscriptions,
@@ -397,6 +520,7 @@ interface WebviewMessage {
     voice?: unknown;
     rate?: unknown;
     url?: unknown;
+    voices?: unknown;
 }
 
 async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
@@ -408,6 +532,10 @@ async function onWebviewMessage(msg: WebviewMessage): Promise<void> {
         await cfg.update('rate', msg.rate, vscode.ConfigurationTarget.Global);
     } else if (msg.kind === 'openExternal' && typeof msg.url === 'string') {
         await confirmAndOpenExternalLink(msg.url);
+    } else if (msg.kind === 'voicesList' && Array.isArray(msg.voices)) {
+        cachedVoices = normalizeVoices(msg.voices);
+        const pending = pendingVoiceRequests.splice(0);
+        for (const resolve of pending) resolve(cachedVoices);
     }
 }
 
