@@ -105,6 +105,34 @@ const BUILT_IN_LENSES: PersonaLens[] = [
         preamble:
             "You are explaining this code to a developer new to the codebase. Lead with intent and the role this code plays before describing mechanics. Anchor in concrete examples of how it gets used. Avoid jargon that a newcomer wouldn't have context for; define terms when they first appear.",
     },
+    {
+        id: 'refactor-scout',
+        label: 'Refactor scout',
+        description: 'Concrete restructurings that would simplify or de-duplicate this.',
+        preamble:
+            'You are scouting refactoring opportunities. Suggest concrete, specific restructurings: extract function, replace conditional with polymorphism, hoist common code, narrow a type, push state down, collapse parallel branches, eliminate primitive obsession. For each suggestion name the smell and the move, and gesture at the resulting shape. Skip cosmetic rewrites that do not change risk, clarity, or coupling.',
+    },
+    {
+        id: 'doc-comment-writer',
+        label: 'Doc-comment writer',
+        description: 'Output formatted as docstrings/inline comments ready to paste in.',
+        preamble:
+            "You are writing documentation aimed at a future maintainer of this file, not a current reviewer. For each symbol produce content that would belong in its docstring or leading comment: purpose, contract (inputs, outputs, invariants), notable side effects, and the one or two things a maintainer would otherwise discover by reading the body. Use the language's idiomatic comment style. Be concise; assume readers can still read the code.",
+    },
+    {
+        id: 'accessibility-reviewer',
+        label: 'Accessibility / i18n reviewer',
+        description: 'ARIA, keyboard nav, contrast, hard-coded user-facing strings.',
+        preamble:
+            'You are reviewing this code through an accessibility and internationalization lens. Focus on UI-facing concerns: ARIA roles and attributes, keyboard navigation and focus order, colour-contrast or contrast-only signalling, hard-coded user-facing strings (translatable or not), screen-reader hostile patterns, layouts that break at large font sizes, locale-sensitive formatting. If the code is not UI/user-facing, say so briefly and skip the analysis rather than inventing concerns.',
+    },
+    {
+        id: 'cost-analyst',
+        label: 'Cost reviewer',
+        description: 'Retry storms, fan-out, idempotency, expensive synchronous calls.',
+        preamble:
+            'You are reviewing this code through an operating-cost lens for cloud/API-heavy systems. Call out: retry storms and missing backoff, accidental fan-out, non-idempotent calls in retried paths, chatty round-trip patterns, expensive synchronous calls in hot paths, missing caching, paginated APIs walked in full, unbounded queue producers. Mention specific call sites; do not generalize about cloud cost discipline.',
+    },
 ];
 
 function composePromptsFromLens(preamble: string): PersonaPrompts {

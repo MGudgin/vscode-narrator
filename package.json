@@ -162,7 +162,7 @@
         "codeNarration.persona": {
           "type": "string",
           "default": "default",
-          "markdownDescription": "Active narration persona. Each persona reuses the same output formatting rules but applies a different review lens.\n\nBuilt-in ids: `default`, `critical`, `security`, `performance`, `tests`, `onboarding`. Custom ids defined in `#codeNarration.customPersonas#` are also accepted. Unknown ids fall back to `default`."
+          "markdownDescription": "Active narration persona. Each persona reuses the same output formatting rules but applies a different review lens.\n\nBuilt-in ids: `default`, `critical`, `security`, `performance`, `tests`, `onboarding`, `refactor-scout`, `doc-comment-writer`, `accessibility-reviewer`, `cost-analyst`. Custom ids defined in `#codeNarration.customPersonas#` are also accepted. Unknown ids fall back to `default`."
         },
         "codeNarration.customPersonas": {
           "type": "object",

@@ -38,6 +38,10 @@ describe('built-in persona registry', () => {
             'performance',
             'tests',
             'onboarding',
+            'refactor-scout',
+            'doc-comment-writer',
+            'accessibility-reviewer',
+            'cost-analyst',
         ]);
     });
 
@@ -88,6 +92,10 @@ describe('built-in persona registry', () => {
             performance: /performance lens/i,
             tests: /test-gap/i,
             onboarding: /new to the codebase/i,
+            'refactor-scout': /refactoring opportunities/i,
+            'doc-comment-writer': /future maintainer of this file/i,
+            'accessibility-reviewer': /accessibility and internationalization/i,
+            'cost-analyst': /operating-cost lens/i,
         };
         for (const [id, re] of Object.entries(fragments)) {
             const persona = getBuiltInPersona(id)!;
