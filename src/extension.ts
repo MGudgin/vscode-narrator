@@ -12,10 +12,17 @@ import {
 } from './llm/index';
 import { narrateDocument, narrateDiff, narrateTreeDiff, readNarrationConfigSnapshot } from './narrate';
 import { renderShell, renderError, SpeechConfig } from './webview';
-import { NarrationTarget, targetMatchesSavedDoc, targetTitle, targetBannerLabel, targetShortName, isAllowedRevealUri, shouldFollowEditor } from './target';
+import { NarrationTarget, targetMatchesSavedDoc, targetTitle, bannerLabelWithPersona, targetShortName, isAllowedRevealUri, shouldFollowEditor } from './target';
 import { NarrationCache } from './cache';
 import { findRepoRootForUri, listRepoRoots, watchRepoState, shouldRefreshOnRepoStateEvent } from './diff';
 import { buildNarrationSink } from './sink';
+import {
+    Persona,
+    readPersonaIdFromConfig,
+    resolvePersona,
+    listBuiltInPersonaIds,
+    getBuiltInPersona,
+} from './personas';
 
 export type ProviderFactory = (
     context: vscode.ExtensionContext,
@@ -98,6 +105,12 @@ function refreshNarrateOnSaveCache(): void {
 
 interface RunOptions {
     skipCache?: boolean;
+    /**
+     * Per-invocation persona override (#23). Takes precedence over the
+     * `codeNarration.persona` setting for this run; subsequent runs revert to
+     * the setting unless they also pass an override.
+     */
+    personaIdOverride?: string;
 }
 
 export function activate(context: vscode.ExtensionContext): ExtensionApi {
@@ -113,6 +126,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.commands.registerCommand('codeNarration.reveal', revealLocation),
         vscode.commands.registerCommand('codeNarration.setApiKey', () => setApiKey(context)),
         vscode.commands.registerCommand('codeNarration.pickModel', () => pickModel(context)),
+        vscode.commands.registerCommand('codeNarration.pickPersona', () => pickPersona()),
         vscode.commands.registerCommand('codeNarration.clearCache', () => clearCacheCommand()),
         vscode.commands.registerCommand('codeNarration.speak', () => speechControl('play')),
         vscode.commands.registerCommand('codeNarration.stopSpeech', () => speechControl('stop')),
@@ -422,7 +436,8 @@ async function runNarration(
 
     currentTarget = target;
     sectionRanges.length = 0;
-    const bannerLabel = targetBannerLabel(target);
+    const persona = resolveActivePersona(opts.personaIdOverride);
+    const bannerLabel = bannerLabelWithPersona(target, persona.label);
     const speechConfig = readSpeechConfig();
     panel.title = targetTitle(target);
     panel.webview.html = renderShell(panel.webview, targetShortName(target), bannerLabel, speechConfig);
@@ -451,6 +466,7 @@ async function runNarration(
             cache,
             providerInfo,
             configSnapshot: readNarrationConfigSnapshot(),
+            persona,
         };
 
         if (target.kind === 'tree') {
@@ -652,6 +668,59 @@ async function clearCacheCommand(): Promise<void> {
     if (ans !== 'Clear') return;
     await cache.clearAll();
     vscode.window.showInformationMessage('Code Narration: cache cleared.');
+}
+
+/**
+ * Resolve the persona to use for the current narration run. Per-invocation
+ * overrides (#23) win over the setting; otherwise we fall back to the
+ * `codeNarration.persona` setting and, if that's missing/invalid, the
+ * built-in `default` persona via `resolvePersona`.
+ *
+ * Custom personas (#24) are merged into the lookup by future work; today the
+ * registry is built-in-only.
+ */
+function resolveActivePersona(overrideId?: string): Persona {
+    const id = overrideId ?? readPersonaIdFromConfig();
+    return resolvePersona(id);
+}
+
+interface PersonaPickItem extends vscode.QuickPickItem {
+    personaId: string;
+}
+
+/**
+ * Quick-pick over the persona registry. Writes the selected id to the global
+ * `codeNarration.persona` setting and re-runs the current narration so the
+ * user sees the new lens immediately.
+ */
+async function pickPersona(): Promise<void> {
+    const items: PersonaPickItem[] = listBuiltInPersonaIds().map((id) => {
+        const persona = getBuiltInPersona(id)!;
+        return {
+            label: persona.label,
+            description: id,
+            detail: persona.description,
+            personaId: id,
+        };
+    });
+    const current = readPersonaIdFromConfig();
+    const choice = await vscode.window.showQuickPick(items, {
+        placeHolder: `Select narration persona (current: ${current})`,
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+    if (!choice) return;
+    await vscode.workspace
+        .getConfiguration('codeNarration')
+        .update('persona', choice.personaId, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(`Code Narration: persona set to ${choice.label}.`);
+    if (currentTarget) {
+        // Re-run the active narration so the banner and prompts reflect the
+        // new persona without waiting on the next manual refresh. We route
+        // through the refresh command rather than calling `runNarration`
+        // directly so the cancellation/cache wiring stays in one place.
+        await vscode.commands.executeCommand('codeNarration.refresh');
+    }
 }
 
 async function setApiKey(context: vscode.ExtensionContext): Promise<void> {

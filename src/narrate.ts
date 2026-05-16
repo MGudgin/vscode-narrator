@@ -10,11 +10,6 @@ import {
 } from './concurrency';
 export { MapWithConcurrencyError, MapWithConcurrencyResult, mapWithConcurrency };
 import {
-    SYSTEM_PROMPT,
-    SYMBOL_SYSTEM_PROMPT,
-    DIFF_SYSTEM_PROMPT,
-    TREE_SUMMARY_SYSTEM_PROMPT,
-    TREE_FILE_DIFF_SYSTEM_PROMPT,
     buildUserPrompt,
     buildUserPromptForRange,
     buildSymbolUserPrompt,
@@ -26,6 +21,7 @@ import {
     fixupLinks,
     stripNarrateLinks,
 } from './prompt';
+import { Persona, getDefaultPersona } from './personas';
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, withIdleTimeout, withTransientRetry } from './retry';
 import {
     DEFAULT_MAX_PROMPT_TOKENS,
@@ -96,6 +92,8 @@ export interface NarrationOptions {
     maxPromptTokens?: number;
     streamIdleTimeoutMs?: number;
     configSnapshot?: NarrationConfigSnapshot;
+    /** Persona whose prompts drive this narration. Defaults to the built-in `default` persona. */
+    persona?: Persona;
 }
 
 function configFrom(options: NarrationOptions): NarrationConfigSnapshot {
@@ -113,6 +111,10 @@ function resolveIdleTimeoutMs(options: NarrationOptions, snapshot: NarrationConf
 
 function resolveConcurrency(options: NarrationOptions, snapshot: NarrationConfigSnapshot): number {
     return options.concurrency ?? snapshot.symbolConcurrency;
+}
+
+function resolvePersona(options: NarrationOptions): Persona {
+    return options.persona ?? getDefaultPersona();
 }
 
 export async function narrateDocument(
@@ -162,7 +164,8 @@ export async function narrateDiff(
             return;
         }
         case 'modified': {
-            const key = diffKey(doc.uri, diffResult.unifiedDiff, baseRef, options.providerInfo);
+            const persona = resolvePersona(options);
+            const key = diffKey(doc.uri, diffResult.unifiedDiff, baseRef, options.providerInfo, persona.cacheTag);
             if (!options.skipCache) {
                 const cached = await options.cache.get(key);
                 if (cached) {
@@ -183,7 +186,7 @@ export async function narrateDiff(
                 provider,
                 token,
                 sink,
-                DIFF_SYSTEM_PROMPT,
+                persona.prompts.diffSystem,
                 buildDiffUserPrompt(doc, baseRef, diffResult.unifiedDiff),
                 (startLine, endLine) =>
                     buildDiffUserPromptForRange(doc, baseRef, diffResult.unifiedDiff, startLine, endLine),
@@ -229,7 +232,8 @@ export async function narrateTreeDiff(
     }
 
     const { changes, combinedDiff } = treeResult;
-    const key = treeDiffKey(repoRoot, combinedDiff, baseRef, options.providerInfo);
+    const persona = resolvePersona(options);
+    const key = treeDiffKey(repoRoot, combinedDiff, baseRef, options.providerInfo, persona.cacheTag);
     if (!options.skipCache) {
         const cached = await options.cache.get(key);
         if (cached) {
@@ -287,8 +291,8 @@ export async function narrateTreeDiff(
     const { errors: treeErrors } = await mapWithConcurrency(allSections, concurrency, async (sec) => {
         if (token.isCancellationRequested) return;
         const systemPrompt = sec.kind === 'summary'
-            ? TREE_SUMMARY_SYSTEM_PROMPT
-            : TREE_FILE_DIFF_SYSTEM_PROMPT;
+            ? persona.prompts.treeSummarySystem
+            : persona.prompts.treeFileDiffSystem;
         const userPrompt = sec.kind === 'summary'
             ? buildTreeSummaryPrompt(repoRoot, baseRef, changes, combinedDiff)
             : buildTreeFileDiffPrompt(repoRoot, baseRef, sec.change!);
@@ -373,6 +377,7 @@ async function narrateFileBody(
 ): Promise<void> {
     const snapshot = configFrom(options);
     options = { ...options, configSnapshot: snapshot };
+    const persona = resolvePersona(options);
     const fetchUnits = options.fetchUnits ?? getNarrationUnits;
     const units = await fetchUnits(doc);
     if (token.isCancellationRequested) return;
@@ -380,7 +385,7 @@ async function narrateFileBody(
     if (units.length === 0) {
         // No symbol provider results — fall back to whole-file caching, keyed
         // on the entire document text. Per-section caching does not apply here.
-        const key = fileKey(doc.uri, doc.getText(), options.providerInfo);
+        const key = fileKey(doc.uri, doc.getText(), options.providerInfo, persona.cacheTag);
         if (!options.skipCache) {
             const cached = await options.cache.get(key);
             if (cached) {
@@ -401,7 +406,7 @@ async function narrateFileBody(
             provider,
             token,
             sink,
-            SYSTEM_PROMPT,
+            persona.prompts.system,
             buildUserPrompt(doc),
             (startLine, endLine) => buildUserPromptForRange(doc, startLine, endLine),
             maxPromptTokens,
@@ -430,6 +435,7 @@ async function narrateFileBody(
                 unitTextHash,
                 maxPromptTokens,
                 options.providerInfo,
+                persona.cacheTag,
             ),
             cachedBody: undefined,
         };
@@ -463,7 +469,7 @@ async function narrateFileBody(
         if (token.isCancellationRequested) return;
         if (sec.cachedBody !== undefined) return;
         try {
-            await narrateSection(sec, doc, provider, token, sink, maxPromptTokens, idleTimeoutMs);
+            await narrateSection(sec, doc, provider, token, sink, maxPromptTokens, idleTimeoutMs, persona.prompts.symbolSystem);
         } catch (err) {
             if (token.isCancellationRequested) return;
             anyFailure = true;
@@ -524,10 +530,11 @@ async function narrateSection(
     sink: NarrationSink,
     maxPromptTokens: number,
     idleTimeoutMs: number,
+    symbolSystem: string,
 ): Promise<void> {
     const fullPrompt = buildSymbolUserPrompt(sec.unit, doc);
     if (!shouldSubChunk(fullPrompt, maxPromptTokens)) {
-        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt, idleTimeoutMs);
+        await streamIntoSection(sec, provider, token, sink, symbolSystem, fullPrompt, idleTimeoutMs);
         return;
     }
 
@@ -542,14 +549,14 @@ async function narrateSection(
     // Defensive: if splitting failed to produce more than one chunk
     // (degenerate input), fall back to a single call rather than blocking.
     if (ranges.length <= 1) {
-        await streamIntoSection(sec, provider, token, sink, SYMBOL_SYSTEM_PROMPT, fullPrompt, idleTimeoutMs);
+        await streamIntoSection(sec, provider, token, sink, symbolSystem, fullPrompt, idleTimeoutMs);
         return;
     }
 
     for (let i = 0; i < ranges.length; i++) {
         if (token.isCancellationRequested) return;
         const range = ranges[i];
-        await streamChunkIntoSection(sec, doc, provider, token, sink, range, i, ranges.length, idleTimeoutMs);
+        await streamChunkIntoSection(sec, doc, provider, token, sink, range, i, ranges.length, idleTimeoutMs, symbolSystem);
     }
 }
 
@@ -569,7 +576,8 @@ async function streamChunkIntoSection(
     chunkIndex: number,
     chunkCount: number,
     idleTimeoutMs: number,
-): Promise<void> {
+    symbolSystem: string,
+): Promise<void>{
     const label = formatLineRangeLabel(range);
     // Spacing between chunks: leading double-newline for any chunk after
     // the first. Keeps the markdown well-formed when chunks concatenate.
@@ -596,7 +604,7 @@ async function streamChunkIntoSection(
                 sink({ kind: 'chunk', sectionId: sec.id, text: sec.accumulated });
             }
             const stream = withIdleTimeout(
-                provider.stream(SYMBOL_SYSTEM_PROMPT, userPrompt, token),
+                provider.stream(symbolSystem, userPrompt, token),
                 idleTimeoutMs,
             );
             for await (const chunk of stream) {
