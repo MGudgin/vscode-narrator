@@ -22,6 +22,7 @@ import {
     resolvePersona,
     listBuiltInPersonaIds,
     getBuiltInPersona,
+    loadCustomPersonasFromConfig,
 } from './personas';
 
 export type ProviderFactory = (
@@ -390,15 +391,8 @@ async function pickPersonaIdForInvocation(argv: unknown): Promise<string | undef
     if (typeof argv === 'string' && argv.length > 0) {
         return argv;
     }
-    const items: PersonaPickItem[] = listBuiltInPersonaIds().map((id) => {
-        const persona = getBuiltInPersona(id)!;
-        return {
-            label: persona.label,
-            description: id,
-            detail: persona.description,
-            personaId: id,
-        };
-    });
+    const { items, loadErrors } = buildPersonaPickItems();
+    reportCustomPersonaErrors(loadErrors);
     const choice = await vscode.window.showQuickPick(items, {
         placeHolder: 'Pick a persona for this narration (does not change the setting)',
         matchOnDescription: true,
@@ -831,12 +825,14 @@ async function clearCacheCommand(): Promise<void> {
  * `codeNarration.persona` setting and, if that's missing/invalid, the
  * built-in `default` persona via `resolvePersona`.
  *
- * Custom personas (#24) are merged into the lookup by future work; today the
- * registry is built-in-only.
+ * Custom personas (#24) are merged in via `codeNarration.customPersonas` and
+ * take precedence over built-ins of the same id (validation rejects collisions
+ * at load time, so this is purely defensive).
  */
 function resolveActivePersona(overrideId?: string): Persona {
     const id = overrideId ?? readPersonaIdFromConfig();
-    return resolvePersona(id);
+    const { personas: custom } = loadCustomPersonasFromConfig();
+    return resolvePersona(id, custom);
 }
 
 interface PersonaPickItem extends vscode.QuickPickItem {
@@ -844,11 +840,11 @@ interface PersonaPickItem extends vscode.QuickPickItem {
 }
 
 /**
- * Quick-pick over the persona registry. Writes the selected id to the global
- * `codeNarration.persona` setting and re-runs the current narration so the
- * user sees the new lens immediately.
+ * Build the persona quick-pick item list, merging built-ins with user-defined
+ * personas from `codeNarration.customPersonas`. Custom entries are visually
+ * marked with a ✎ prefix so they're easy to distinguish.
  */
-async function pickPersona(): Promise<void> {
+function buildPersonaPickItems(): { items: PersonaPickItem[]; loadErrors: { id: string; reason: string }[] } {
     const items: PersonaPickItem[] = listBuiltInPersonaIds().map((id) => {
         const persona = getBuiltInPersona(id)!;
         return {
@@ -858,6 +854,36 @@ async function pickPersona(): Promise<void> {
             personaId: id,
         };
     });
+    const { personas: custom, errors } = loadCustomPersonasFromConfig();
+    for (const persona of custom.values()) {
+        items.push({
+            label: `$(pencil) ${persona.label}`,
+            description: `${persona.id} (custom)`,
+            detail: persona.description,
+            personaId: persona.id,
+        });
+    }
+    return { items, loadErrors: errors };
+}
+
+function reportCustomPersonaErrors(errors: { id: string; reason: string }[]): void {
+    if (errors.length === 0) return;
+    const first = errors[0];
+    const more = errors.length > 1 ? ` (+${errors.length - 1} more)` : '';
+    const where = first.id ? ` ["${first.id}"]` : '';
+    vscode.window.showWarningMessage(
+        `Code Narration: ignoring invalid custom persona${where}: ${first.reason}${more}`,
+    );
+}
+
+/**
+ * Quick-pick over the persona registry. Writes the selected id to the global
+ * `codeNarration.persona` setting and re-runs the current narration so the
+ * user sees the new lens immediately.
+ */
+async function pickPersona(): Promise<void> {
+    const { items, loadErrors } = buildPersonaPickItems();
+    reportCustomPersonaErrors(loadErrors);
     const current = readPersonaIdFromConfig();
     const choice = await vscode.window.showQuickPick(items, {
         placeHolder: `Select narration persona (current: ${current})`,

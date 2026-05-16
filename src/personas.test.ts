@@ -17,6 +17,9 @@ import {
     listBuiltInPersonaIds,
     readPersonaIdFromConfig,
     resolvePersona,
+    validateCustomPersonas,
+    loadCustomPersonasFromConfig,
+    CUSTOM_PROMPT_MAX_CHARS,
 } from './personas';
 
 const vscodeMock = vscode as unknown as {
@@ -169,5 +172,139 @@ describe('buildPersonaFromLens (custom persona helper)', () => {
         const h2 = hashPersonaPrompts(p.prompts);
         expect(h1).toBe(h2);
         expect(h1.length).toBe(16);
+    });
+});
+
+describe('validateCustomPersonas (#24)', () => {
+    test('returns an empty result for missing/null config', () => {
+        const empty = validateCustomPersonas(undefined);
+        expect(empty.personas.size).toBe(0);
+        expect(empty.errors).toEqual([]);
+        const nul = validateCustomPersonas(null);
+        expect(nul.personas.size).toBe(0);
+        expect(nul.errors).toEqual([]);
+    });
+
+    test('reports a top-level error when the value is not an object', () => {
+        const { personas, errors } = validateCustomPersonas([]);
+        expect(personas.size).toBe(0);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].reason).toMatch(/object map/);
+    });
+
+    test('accepts a valid preamble-only entry and composes onto the base prompts', () => {
+        const { personas, errors } = validateCustomPersonas({
+            'pci-aware': {
+                displayName: 'PCI-aware reviewer',
+                description: 'Fintech house style.',
+                preamble: 'You are reviewing with PCI-DSS in mind.',
+            },
+        });
+        expect(errors).toEqual([]);
+        const p = personas.get('pci-aware');
+        expect(p, 'expected pci-aware persona').toBeDefined();
+        expect((p as Persona).source).toBe('custom');
+        expect((p as Persona).label).toBe('PCI-aware reviewer');
+        expect((p as Persona).prompts.system).toContain('PCI-DSS');
+        // Base output rules still applied to every prompt slot.
+        expect((p as Persona).prompts.system.endsWith(SYSTEM_PROMPT)).toBe(true);
+        expect((p as Persona).prompts.symbolSystem.endsWith(SYMBOL_SYSTEM_PROMPT)).toBe(true);
+        expect((p as Persona).prompts.diffSystem.endsWith(DIFF_SYSTEM_PROMPT)).toBe(true);
+        expect((p as Persona).prompts.treeSummarySystem.endsWith(TREE_SUMMARY_SYSTEM_PROMPT)).toBe(true);
+        expect((p as Persona).prompts.treeFileDiffSystem.endsWith(TREE_FILE_DIFF_SYSTEM_PROMPT)).toBe(true);
+    });
+
+    test('accepts full prompt overrides and skips composition for overridden slots', () => {
+        const { personas, errors } = validateCustomPersonas({
+            'fully-custom': {
+                displayName: 'Fully custom',
+                systemPrompt: 'CUSTOM SYS',
+                symbolSystemPrompt: 'CUSTOM SYM',
+                diffSystemPrompt: 'CUSTOM DIFF',
+            },
+        });
+        expect(errors).toEqual([]);
+        const p = personas.get('fully-custom') as Persona;
+        expect(p.prompts.system).toBe('CUSTOM SYS');
+        expect(p.prompts.symbolSystem).toBe('CUSTOM SYM');
+        expect(p.prompts.diffSystem).toBe('CUSTOM DIFF');
+        // Non-overridden slots fall back to the base prompts.
+        expect(p.prompts.treeSummarySystem).toBe(TREE_SUMMARY_SYSTEM_PROMPT);
+        expect(p.prompts.treeFileDiffSystem).toBe(TREE_FILE_DIFF_SYSTEM_PROMPT);
+    });
+
+    test('cache tag changes when prompts change so edits invalidate the cache', () => {
+        const a = validateCustomPersonas({ 'p': { preamble: 'A' } }).personas.get('p') as Persona;
+        const b = validateCustomPersonas({ 'p': { preamble: 'B' } }).personas.get('p') as Persona;
+        expect(a.cacheTag).not.toBe(b.cacheTag);
+        expect(a.cacheTag.startsWith('custom:p:')).toBe(true);
+    });
+
+    test('rejects malformed ids without dropping the other entries', () => {
+        const { personas, errors } = validateCustomPersonas({
+            '': { preamble: 'x' },
+            'has spaces': { preamble: 'x' },
+            'has/slash': { preamble: 'x' },
+            'good-one': { preamble: 'still loads' },
+        });
+        expect(personas.size).toBe(1);
+        expect(personas.has('good-one')).toBe(true);
+        expect(errors.length).toBe(3);
+    });
+
+    test('rejects ids that collide with built-in personas', () => {
+        const { personas, errors } = validateCustomPersonas({
+            security: { preamble: 'override attempt' },
+        });
+        expect(personas.size).toBe(0);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].id).toBe('security');
+        expect(errors[0].reason).toMatch(/built-in/);
+    });
+
+    test('rejects entries with no prompt content at all', () => {
+        const { personas, errors } = validateCustomPersonas({
+            'empty': { displayName: 'Empty' },
+        });
+        expect(personas.size).toBe(0);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].reason).toMatch(/at least one/);
+    });
+
+    test('rejects oversize prompt strings to prevent silent breakage', () => {
+        const huge = 'x'.repeat(CUSTOM_PROMPT_MAX_CHARS + 1);
+        const { personas, errors } = validateCustomPersonas({
+            'big': { systemPrompt: huge },
+        });
+        expect(personas.size).toBe(0);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].reason).toMatch(/exceeds .*-character limit/);
+    });
+
+    test('rejects entries where a field is the wrong type', () => {
+        const { personas, errors } = validateCustomPersonas({
+            'p': { preamble: 123 },
+        });
+        expect(personas.size).toBe(0);
+        expect(errors).toHaveLength(1);
+        expect(errors[0].reason).toMatch(/must be a string/);
+    });
+
+    test('resolvePersona looks custom personas up before built-ins', () => {
+        const custom = validateCustomPersonas({
+            'house-style': { preamble: 'house lens' },
+        }).personas;
+        const p = resolvePersona('house-style', custom);
+        expect(p.id).toBe('house-style');
+        expect(p.source).toBe('custom');
+    });
+
+    test('loadCustomPersonasFromConfig reads the setting via the workspace config API', () => {
+        __setConfig('customPersonas', {
+            'house-style': { preamble: 'house lens' },
+        });
+        const { personas, errors } = loadCustomPersonasFromConfig();
+        expect(errors).toEqual([]);
+        expect(personas.has('house-style')).toBe(true);
     });
 });

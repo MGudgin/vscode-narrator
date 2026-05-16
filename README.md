@@ -55,7 +55,8 @@ You can also edit settings directly:
 | `codeNarration.recurseSymbols` | `"auto"` | Narrate child symbols as their own sections. `"auto"` recurses for container-heavy languages and stays top-level for others; `"always"` forces recursion; `"never"` forces top-level only |
 | `codeNarration.maxPromptTokens` | `50000` | Token budget per prompt body; oversized symbols are sub-chunked and merged |
 | `codeNarration.streamIdleTimeoutMs` | `60000` | Max ms the LLM stream may go without emitting a chunk before the request is aborted and (where applicable) retried. Guards against hung proxies and stalled SSE connections. `0` disables. |
-| `codeNarration.persona` | `"default"` | Active narration persona. Built-ins: `default`, `critical`, `security`, `performance`, `tests`, `onboarding`. Each persona shares the same output rules but applies a different review lens. |
+| `codeNarration.persona` | `"default"` | Active narration persona. Built-ins: `default`, `critical`, `security`, `performance`, `tests`, `onboarding`. Custom ids from `codeNarration.customPersonas` are also accepted. |
+| `codeNarration.customPersonas` | `{}` | Map of user-defined personas (id → `{displayName, description, preamble, systemPrompt, ...}`). See [Custom personas](#custom-personas). |
 | `codeNarration.speech.enabled` | `false` | Show TTS controls in the narration pane and enable the system speech voices (Web Speech API). |
 | `codeNarration.speech.autoPlay` | `false` | Speak sentences automatically as they stream in. Requires `speech.enabled`. |
 | `codeNarration.speech.voice` | `""` | Preferred voice name. Empty uses the system default. Set via **Code Narration: Pick Voice**. |
@@ -91,6 +92,24 @@ Built-in personas:
   "args": "security"
 }
 ```
+
+### Custom personas
+
+Define your own lenses with the `codeNarration.customPersonas` setting. Each entry is keyed by a persona id (1-64 chars: letters, digits, `-`, `_`) and may set a user-visible `displayName`, a `description`, and prompt overrides. The simplest shape extends the built-in output rules with a single `preamble` sentence:
+
+```jsonc
+"codeNarration.customPersonas": {
+  "pci-aware": {
+    "displayName": "PCI-aware reviewer",
+    "description": "Fintech house style: flag PCI-DSS-relevant code paths.",
+    "preamble": "You are reviewing this code with PCI-DSS in mind. Call out cardholder data handling, key management, and audit-trail gaps."
+  }
+}
+```
+
+You can also fully override any prompt slot (`systemPrompt`, `symbolSystemPrompt`, `diffSystemPrompt`, `treeSummarySystemPrompt`, `treeFileDiffSystemPrompt`); slots you don't override fall back to the built-in base prompts with your `preamble` (if any) prepended, so you don't have to re-state the shared output formatting rules.
+
+Custom personas appear in the `Pick Persona` quick-pick (marked with a ✎ icon) and are accepted by the `codeNarration.persona` setting. Each persona's cache tag includes a hash of its prompts, so editing a custom persona invalidates only its cached narrations. Invalid entries (id collisions with built-ins, unknown fields, oversize prompts, etc.) are skipped at load time and surface a one-shot warning rather than breaking narration.
 
 ## Commands
 
