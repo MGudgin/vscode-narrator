@@ -26,7 +26,9 @@
         "codeNarration.provider",
         "codeNarration.anthropic.model",
         "codeNarration.vscodeLm.modelFamily",
-        "codeNarration.speech.voice"
+        "codeNarration.speech.voice",
+        "codeNarration.persona",
+        "codeNarration.customPersonas"
       ]
     }
   },
@@ -69,6 +71,11 @@
       {
         "command": "codeNarration.pickModel",
         "title": "Pick Model",
+        "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.pickPersona",
+        "title": "Pick Persona",
         "category": "Code Narration"
       },
       {
@@ -141,6 +148,27 @@
           "type": "string",
           "default": "claude-sonnet-4-6",
           "description": "Anthropic model ID. Examples: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5-20251001."
+        },
+        "codeNarration.persona": {
+          "type": "string",
+          "enum": [
+            "default",
+            "critical",
+            "security",
+            "performance",
+            "tests",
+            "onboarding"
+          ],
+          "enumDescriptions": [
+            "What does this code do and why does it exist?",
+            "What's questionable, missing, or risky? Pushback you'd raise in PR review.",
+            "Untrusted input flow, auth, injection, secrets, dependency risks.",
+            "Hot paths, allocations, blocking calls, async pitfalls, big-O concerns.",
+            "Branches and edge cases that aren't covered. What tests would I write?",
+            "Explain this to someone new. Frame intent before mechanics."
+          ],
+          "default": "default",
+          "description": "Active narration persona. Each persona reuses the same output formatting rules but applies a different review lens. Custom personas declared in `codeNarration.customPersonas` are also accepted here once that feature lands."
         },
         "codeNarration.anthropic.maxOutputTokens": {
           "type": "integer",

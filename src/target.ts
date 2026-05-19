@@ -78,6 +78,23 @@ export function targetBannerLabel(target: NarrationTarget): string {
     }
 }
 
+/**
+ * Compose the banner string used by the narration pane, appending the active
+ * persona's label as a `•`-separated suffix when it's anything other than the
+ * built-in `default` persona.
+ *
+ * Empty `personaLabel` or the literal `Default` (the built-in default
+ * persona's label) is omitted so the banner stays uncluttered for the most
+ * common case. Other personas surface in the banner so the user can tell at a
+ * glance which lens shaped the narration they're looking at.
+ */
+export function bannerLabelWithPersona(target: NarrationTarget, personaLabel: string | undefined): string {
+    const base = targetBannerLabel(target);
+    if (!personaLabel) return base;
+    if (personaLabel === 'Default') return base;
+    return `${base} • ${personaLabel}`;
+}
+
 export function targetShortName(target: NarrationTarget): string {
     return target.kind === 'tree' ? shortName(target.repoRoot) : shortName(target.uri);
 }

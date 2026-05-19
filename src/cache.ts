@@ -110,8 +110,27 @@ export class NarrationCache {
     }
 }
 
-export function fileKey(uri: vscode.Uri, content: string, info: ProviderInfo): string {
-    return hashKey(['file', uri.toString(), content, info.kind, info.model, String(PROMPT_VERSION)]);
+// Default cache-tag used when a caller omits a persona — corresponds to the
+// built-in `default` persona registered in `src/personas.ts`. Defined here
+// (rather than imported) to keep `cache.ts` free of the persona dependency
+// graph and to let `personas.ts` import cache helpers without a cycle.
+const DEFAULT_PERSONA_CACHE_TAG = 'builtin:default';
+
+export function fileKey(
+    uri: vscode.Uri,
+    content: string,
+    info: ProviderInfo,
+    personaCacheTag: string = DEFAULT_PERSONA_CACHE_TAG,
+): string {
+    return hashKey([
+        'file',
+        uri.toString(),
+        content,
+        info.kind,
+        info.model,
+        String(PROMPT_VERSION),
+        personaCacheTag,
+    ]);
 }
 
 export function sectionKey(
@@ -120,8 +139,9 @@ export function sectionKey(
     unitText: string,
     maxPromptTokens: number,
     info: ProviderInfo,
+    personaCacheTag: string = DEFAULT_PERSONA_CACHE_TAG,
 ): string {
-    return sectionKeyFromHash(uri, unitName, hashContent(unitText), maxPromptTokens, info);
+    return sectionKeyFromHash(uri, unitName, hashContent(unitText), maxPromptTokens, info, personaCacheTag);
 }
 
 export function sectionKeyFromHash(
@@ -130,6 +150,7 @@ export function sectionKeyFromHash(
     unitTextHash: string,
     maxPromptTokens: number,
     info: ProviderInfo,
+    personaCacheTag: string = DEFAULT_PERSONA_CACHE_TAG,
 ): string {
     return hashKey([
         'section',
@@ -140,6 +161,7 @@ export function sectionKeyFromHash(
         info.kind,
         info.model,
         String(PROMPT_VERSION),
+        personaCacheTag,
     ]);
 }
 
@@ -147,12 +169,42 @@ export function hashContent(text: string): string {
     return crypto.createHash('sha256').update(text).digest('hex');
 }
 
-export function diffKey(uri: vscode.Uri, unifiedDiff: string, baseRef: string, info: ProviderInfo): string {
-    return hashKey(['diff', uri.toString(), unifiedDiff, baseRef, info.kind, info.model, String(PROMPT_VERSION)]);
+export function diffKey(
+    uri: vscode.Uri,
+    unifiedDiff: string,
+    baseRef: string,
+    info: ProviderInfo,
+    personaCacheTag: string = DEFAULT_PERSONA_CACHE_TAG,
+): string {
+    return hashKey([
+        'diff',
+        uri.toString(),
+        unifiedDiff,
+        baseRef,
+        info.kind,
+        info.model,
+        String(PROMPT_VERSION),
+        personaCacheTag,
+    ]);
 }
 
-export function treeDiffKey(repoRoot: vscode.Uri, combinedDiff: string, baseRef: string, info: ProviderInfo): string {
-    return hashKey(['tree', repoRoot.toString(), combinedDiff, baseRef, info.kind, info.model, String(PROMPT_VERSION)]);
+export function treeDiffKey(
+    repoRoot: vscode.Uri,
+    combinedDiff: string,
+    baseRef: string,
+    info: ProviderInfo,
+    personaCacheTag: string = DEFAULT_PERSONA_CACHE_TAG,
+): string {
+    return hashKey([
+        'tree',
+        repoRoot.toString(),
+        combinedDiff,
+        baseRef,
+        info.kind,
+        info.model,
+        String(PROMPT_VERSION),
+        personaCacheTag,
+    ]);
 }
 
 function hashKey(parts: string[]): string {

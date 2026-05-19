@@ -55,6 +55,7 @@ You can also edit settings directly:
 | `codeNarration.recurseSymbols` | `"auto"` | Narrate child symbols as their own sections. `"auto"` recurses for container-heavy languages and stays top-level for others; `"always"` forces recursion; `"never"` forces top-level only |
 | `codeNarration.maxPromptTokens` | `50000` | Token budget per prompt body; oversized symbols are sub-chunked and merged |
 | `codeNarration.streamIdleTimeoutMs` | `60000` | Max ms the LLM stream may go without emitting a chunk before the request is aborted and (where applicable) retried. Guards against hung proxies and stalled SSE connections. `0` disables. |
+| `codeNarration.persona` | `"default"` | Active narration persona. Built-ins: `default`, `critical`, `security`, `performance`, `tests`, `onboarding`. Each persona shares the same output rules but applies a different review lens. |
 | `codeNarration.speech.enabled` | `false` | Show TTS controls in the narration pane and enable the system speech voices (Web Speech API). |
 | `codeNarration.speech.autoPlay` | `false` | Speak sentences automatically as they stream in. Requires `speech.enabled`. |
 | `codeNarration.speech.voice` | `""` | Preferred voice name. Empty uses the system default. Set via **Code Narration: Pick Voice**. |
@@ -62,6 +63,21 @@ You can also edit settings directly:
 | `codeNarration.speech.pitch` | `1.0` | Speech pitch multiplier (0 = lowest, 2 = highest). |
 
 `"auto"` (the default) recurses for languages whose top level is mostly namespaces and classes — C#, Java, C/C++, Kotlin, Swift, Scala, F#, VB, Objective-C/C++ — so methods, properties, and events each get their own section, and stays top-level only for everything else. Set the value globally or under a `[language]` scope to override. Legacy boolean values (`true`/`false`) are still honored as `"always"`/`"never"`.
+
+## Personas
+
+A persona controls the *lens* a narration uses — the same code reads very differently as "what does this do?" vs "what's risky here?" — without changing the output format (line-numbered links, no fenced code blocks, etc.). Switch via `codeNarration.persona` or **Code Narration: Pick Persona**. The active persona is shown in the narration pane banner whenever it isn't the default, and is part of the cache key so swapping personas serves a fresh narration.
+
+Built-in personas:
+
+| Id | Lens |
+| --- | --- |
+| `default` | What does this code do and why does it exist? |
+| `critical` | What's questionable, missing, or risky? Pushback you'd raise in PR review. |
+| `security` | Untrusted-input flow, auth, injection, secrets, dependency risks. |
+| `performance` | Hot paths, allocations, blocking calls, async pitfalls, big-O concerns. |
+| `tests` | Branches and edge cases that aren't covered. What tests would I write? |
+| `onboarding` | Explain this to someone new to the codebase. Frame intent before mechanics. |
 
 ## Commands
 
@@ -72,6 +88,7 @@ You can also edit settings directly:
 | Code Narration: Open Tree Diff Narration | Narrate every changed file in the repo vs base ref |
 | Code Narration: Refresh Narration | Re-run, bypassing the cache |
 | Code Narration: Pick Model | Quick-pick a model |
+| Code Narration: Pick Persona | Quick-pick the active narration persona |
 | Code Narration: Set Anthropic API Key | Store / clear the Anthropic key |
 | Code Narration: Clear Cache | Wipe cached narrations for this workspace |
 | Code Narration: Speak Narration | Start TTS playback of the current narration |
