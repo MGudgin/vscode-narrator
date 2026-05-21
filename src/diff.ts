@@ -33,16 +33,30 @@ interface GitAPI {
     getRepository(uri: vscode.Uri): GitRepository | null;
 }
 
-interface GitRepository {
+export interface GitRepository {
     rootUri: vscode.Uri;
     state: GitRepositoryState;
     diffWith(ref: string): Promise<GitChange[]>;
     diffWith(ref: string, path: string): Promise<string>;
     show(ref: string, path: string): Promise<string>;
+    log(options?: { maxEntries?: number }): Promise<GitCommit[]>;
 }
 
 interface GitRepositoryState {
     onDidChange: vscode.Event<void>;
+    HEAD: { name?: string; commit?: string } | undefined;
+    refs: GitRef[];
+}
+
+export interface GitCommit {
+    hash: string;
+    message: string;
+}
+
+export interface GitRef {
+    type: number;
+    name?: string;
+    commit?: string;
 }
 
 interface GitChange {
@@ -146,6 +160,18 @@ export async function findRepoRootForUri(uri: vscode.Uri): Promise<vscode.Uri | 
     if (!api) return undefined;
     const repo = api.getRepository(uri);
     return repo?.rootUri;
+}
+
+export async function getRepositoryForUri(uri: vscode.Uri): Promise<GitRepository | undefined> {
+    const api = await getGitApi();
+    if (!api) return undefined;
+    return api.getRepository(uri) ?? undefined;
+}
+
+export async function getRepositoryForRoot(repoRoot: vscode.Uri): Promise<GitRepository | undefined> {
+    const api = await getGitApi();
+    if (!api) return undefined;
+    return pickRepoForRoot(api, repoRoot);
 }
 
 export async function listRepoRoots(): Promise<vscode.Uri[]> {
