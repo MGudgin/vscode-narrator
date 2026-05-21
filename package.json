@@ -28,7 +28,8 @@
         "codeNarration.vscodeLm.modelFamily",
         "codeNarration.speech.voice",
         "codeNarration.persona",
-        "codeNarration.customPersonas"
+        "codeNarration.customPersonas",
+        "codeNarration.diffBase"
       ]
     }
   },
