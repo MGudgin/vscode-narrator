@@ -1,5 +1,14 @@
 import { describe, test, expect } from 'vitest';
-import { ensureWorkspaceTrustedForNarration, isValidRange, findSectionForLine } from './extension';
+import {
+    ensureWorkspaceTrustedForNarration,
+    isValidRange,
+    findSectionForLine,
+    normalizeVoices,
+    pickVoiceCore,
+    PickVoiceDeps,
+    VoiceInfo,
+    VoiceQuickPickItem,
+} from './extension';
 
 type Section = { id: string; range: { start: { line: number }; end: { line: number } } };
 
@@ -218,5 +227,180 @@ describe('ensureWorkspaceTrustedForNarration — regression for #127', () => {
             ensureWorkspaceTrustedForNarration(false, label, (m) => warnings.push(m));
             expect(warnings[0]).toContain(label);
         }
+    });
+});
+
+describe('normalizeVoices', () => {
+    test('returns an empty array for an empty input', () => {
+        expect(normalizeVoices([])).toEqual([]);
+    });
+
+    test('drops entries with missing or non-string names', () => {
+        expect(normalizeVoices([
+            { name: 'Alice', lang: 'en-US' },
+            { name: '', lang: 'en-US' },
+            { lang: 'en-US' },
+            null,
+            'not-an-object',
+            42,
+        ])).toEqual([{ name: 'Alice', lang: 'en-US', default: undefined, localService: undefined }]);
+    });
+
+    test('coerces missing lang to empty string', () => {
+        expect(normalizeVoices([{ name: 'Alice' }])).toEqual([
+            { name: 'Alice', lang: '', default: undefined, localService: undefined },
+        ]);
+    });
+
+    test('preserves default and localService booleans, ignoring non-booleans', () => {
+        expect(normalizeVoices([
+            { name: 'Alice', lang: 'en-US', default: true, localService: true },
+            { name: 'Bob', lang: 'fr-FR', default: 'yes', localService: 0 },
+        ])).toEqual([
+            { name: 'Alice', lang: 'en-US', default: true, localService: true },
+            { name: 'Bob', lang: 'fr-FR', default: undefined, localService: undefined },
+        ]);
+    });
+
+    test('deduplicates by name, keeping the first occurrence', () => {
+        expect(normalizeVoices([
+            { name: 'Alice', lang: 'en-US' },
+            { name: 'Alice', lang: 'en-GB' },
+            { name: 'Bob', lang: 'fr-FR' },
+        ])).toEqual([
+            { name: 'Alice', lang: 'en-US', default: undefined, localService: undefined },
+            { name: 'Bob', lang: 'fr-FR', default: undefined, localService: undefined },
+        ]);
+    });
+});
+
+describe('pickVoiceCore', () => {
+    interface Recorded {
+        savedValue?: string;
+        info?: string;
+        inputBoxShown: boolean;
+        quickPickShown: boolean;
+        quickPickItems?: readonly VoiceQuickPickItem[];
+    }
+
+    function makeDeps(overrides: {
+        current?: string;
+        hasPanel?: boolean;
+        voices?: VoiceInfo[];
+        quickPick?: (items: readonly VoiceQuickPickItem[]) => VoiceQuickPickItem | undefined;
+        inputBox?: (options: { value?: string }) => string | undefined;
+    } = {}): { deps: PickVoiceDeps; rec: Recorded } {
+        const rec: Recorded = { inputBoxShown: false, quickPickShown: false };
+        const deps: PickVoiceDeps = {
+            getCurrent: () => overrides.current ?? '',
+            hasNarrationPanel: () => overrides.hasPanel ?? true,
+            fetchVoices: () => Promise.resolve(overrides.voices ?? []),
+            showQuickPick: (items) => {
+                rec.quickPickShown = true;
+                rec.quickPickItems = items;
+                const pick = overrides.quickPick ? overrides.quickPick(items) : undefined;
+                return Promise.resolve(pick);
+            },
+            showInputBox: (options) => {
+                rec.inputBoxShown = true;
+                const v = overrides.inputBox ? overrides.inputBox(options) : undefined;
+                return Promise.resolve(v);
+            },
+            save: (value) => { rec.savedValue = value; return Promise.resolve(); },
+            showInfo: (message) => { rec.info = message; },
+        };
+        return { deps, rec };
+    }
+
+    test('falls back to free-text input when no narration panel is open', async () => {
+        const { deps, rec } = makeDeps({ hasPanel: false, inputBox: () => 'Daniel' });
+        await pickVoiceCore(deps);
+        expect(rec.inputBoxShown).toBe(true);
+        expect(rec.quickPickShown).toBe(false);
+        expect(rec.savedValue).toBe('Daniel');
+        expect(rec.info).toBe('Code Narration: voice set to Daniel.');
+    });
+
+    test('falls back to free-text input when the webview reports no voices', async () => {
+        const { deps, rec } = makeDeps({ hasPanel: true, voices: [], inputBox: () => '' });
+        await pickVoiceCore(deps);
+        expect(rec.inputBoxShown).toBe(true);
+        expect(rec.quickPickShown).toBe(false);
+        expect(rec.savedValue).toBe('');
+        expect(rec.info).toBe('Code Narration: voice cleared (using system default).');
+    });
+
+    test('does not save or notify when the free-text input is cancelled', async () => {
+        const { deps, rec } = makeDeps({ hasPanel: false, inputBox: () => undefined });
+        await pickVoiceCore(deps);
+        expect(rec.savedValue).toBeUndefined();
+        expect(rec.info).toBeUndefined();
+    });
+
+    test('shows a quick-pick when voices are available and persists the selection', async () => {
+        const voices: VoiceInfo[] = [
+            { name: 'Alice', lang: 'en-US', default: true },
+            { name: 'Bob', lang: 'fr-FR' },
+        ];
+        const { deps, rec } = makeDeps({
+            current: '',
+            voices,
+            quickPick: (items) => items.find((i) => i.voiceName === 'Bob'),
+        });
+        await pickVoiceCore(deps);
+        expect(rec.quickPickShown).toBe(true);
+        expect(rec.inputBoxShown).toBe(false);
+        // First item is the Default sentinel; voices follow in input order.
+        expect(rec.quickPickItems?.map((i) => i.voiceName)).toEqual(['', 'Alice', 'Bob']);
+        expect(rec.quickPickItems?.[1].detail).toBe('default');
+        expect(rec.savedValue).toBe('Bob');
+        expect(rec.info).toBe('Code Narration: voice set to Bob.');
+    });
+
+    test('quick-pick includes a Default sentinel that clears the voice setting', async () => {
+        const voices: VoiceInfo[] = [{ name: 'Alice', lang: 'en-US' }];
+        const { deps, rec } = makeDeps({
+            current: 'Alice',
+            voices,
+            quickPick: (items) => items[0], // The Default sentinel.
+        });
+        await pickVoiceCore(deps);
+        expect(rec.savedValue).toBe('');
+        expect(rec.info).toBe('Code Narration: voice cleared (using system default).');
+    });
+
+    test('pre-marks the current voice as picked in the quick-pick', async () => {
+        const voices: VoiceInfo[] = [
+            { name: 'Alice', lang: 'en-US' },
+            { name: 'Bob', lang: 'fr-FR' },
+        ];
+        const { deps, rec } = makeDeps({
+            current: 'Bob',
+            voices,
+            quickPick: () => undefined,
+        });
+        await pickVoiceCore(deps);
+        const picked = rec.quickPickItems?.filter((i) => i.picked === true).map((i) => i.voiceName);
+        expect(picked).toEqual(['Bob']);
+    });
+
+    test('skips save and notify when the quick-pick is cancelled', async () => {
+        const voices: VoiceInfo[] = [{ name: 'Alice', lang: 'en-US' }];
+        const { deps, rec } = makeDeps({ voices, quickPick: () => undefined });
+        await pickVoiceCore(deps);
+        expect(rec.savedValue).toBeUndefined();
+        expect(rec.info).toBeUndefined();
+    });
+
+    test('skips save and notify when the user picks the already-selected voice', async () => {
+        const voices: VoiceInfo[] = [{ name: 'Alice', lang: 'en-US' }];
+        const { deps, rec } = makeDeps({
+            current: 'Alice',
+            voices,
+            quickPick: (items) => items.find((i) => i.voiceName === 'Alice'),
+        });
+        await pickVoiceCore(deps);
+        expect(rec.savedValue).toBeUndefined();
+        expect(rec.info).toBeUndefined();
     });
 });

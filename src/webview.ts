@@ -325,22 +325,37 @@ const SPEECH_CLIENT_JS = `
   function refreshVoices() {
     voices = synth.getVoices();
     const sel = document.getElementById('speech-voice');
-    if (!sel) return;
-    const prev = sel.value;
-    sel.innerHTML = '';
-    const def = document.createElement('option');
-    def.value = '';
-    def.textContent = 'Default';
-    sel.appendChild(def);
-    for (const v of voices) {
-      const o = document.createElement('option');
-      o.value = v.name;
-      o.textContent = v.name + ' (' + v.lang + ')';
-      sel.appendChild(o);
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = '';
+      const def = document.createElement('option');
+      def.value = '';
+      def.textContent = 'Default';
+      sel.appendChild(def);
+      for (const v of voices) {
+        const o = document.createElement('option');
+        o.value = v.name;
+        o.textContent = v.name + ' (' + v.lang + ')';
+        sel.appendChild(o);
+      }
+      const want = cfg.voice || prev || '';
+      sel.value = want;
+      chosenVoice = voices.find(function (v) { return v.name === sel.value; }) || null;
     }
-    const want = cfg.voice || prev || '';
-    sel.value = want;
-    chosenVoice = voices.find(function (v) { return v.name === sel.value; }) || null;
+    postVoicesList();
+  }
+
+  function postVoicesList() {
+    if (!vscodeApi) return;
+    const payload = voices.map(function (v) {
+      return {
+        name: v.name,
+        lang: v.lang,
+        default: !!v.default,
+        localService: !!v.localService,
+      };
+    });
+    postToHost({ kind: 'voicesList', voices: payload });
   }
 
   function setButtons() {
@@ -567,6 +582,12 @@ const SPEECH_CLIENT_JS = `
         }
         if (typeof msg.autoPlay === 'boolean') cfg.autoPlay = msg.autoPlay;
         if (typeof msg.pitch === 'number') cfg.pitch = msg.pitch;
+      }
+      else if (msg.kind === 'getVoices') {
+        // Some browsers populate voices asynchronously — ensure we have the
+        // freshest list before responding to the extension host's pickVoice.
+        voices = synth.getVoices();
+        postVoicesList();
       }
     },
     speakSection: speakSection,
