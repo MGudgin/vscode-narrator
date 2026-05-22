@@ -31,6 +31,7 @@ You can also edit settings directly:
 - **Click a section heading** in the narration pane to jump the editor to that range. In tree-diff mode, sections for deleted files render as headings without a link.
 - **Cursor sync**: moving the cursor in the editor highlights the matching section in the narration pane.
 - **On save**: if the narrated file is saved, the narration re-runs (debounced). Toggle with `codeNarration.narrateOnSave`.
+- **Live edit**: enable `codeNarration.liveEdit` to re-narrate file-mode targets as you type, after a brief pause. The per-section cache means only sections whose source actually changed call the language model. Diff and tree-diff targets ignore this setting.
 - **Follow active editor**: enable `codeNarration.followActiveEditor` to retarget file-mode narration as focus moves between files. Diff and tree-diff stay pinned regardless.
 - **Speech**: enable `codeNarration.speech.enabled` to show TTS controls in the banner (play / pause / stop, voice picker, rate slider). With `codeNarration.speech.autoPlay` on, sentences are spoken as they stream in.
 
@@ -50,6 +51,7 @@ You can also edit settings directly:
 | `codeNarration.anthropic.maxOutputTokens` | `16384` | Max tokens an Anthropic narration may emit per request. Raise if long symbols / diffs are getting cut off (a truncation marker appears in the section); lower to cap spend. Should not exceed the model's documented max (Sonnet 4.6: 64k, Opus 4.7: 32k, Haiku 4.5: 8k). |
 | `codeNarration.diffBase` | `HEAD` | Git ref for diff mode |
 | `codeNarration.narrateOnSave` | `true` | Re-narrate after save |
+| `codeNarration.liveEdit` | `false` | Re-narrate as you type (file mode only), after a 1.5 s pause. Diff and tree-diff targets ignore this. |
 | `codeNarration.followActiveEditor` | `false` | In file mode, retarget the pane as the active editor changes. Diff / tree-diff targets stay pinned. |
 | `codeNarration.symbolConcurrency` | `4` | Max parallel LLM calls during symbol-aware fan-out (1–16) |
 | `codeNarration.recurseSymbols` | `"auto"` | Narrate child symbols as their own sections. `"auto"` recurses for container-heavy languages and stays top-level for others; `"always"` forces recursion; `"never"` forces top-level only |

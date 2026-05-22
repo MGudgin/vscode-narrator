@@ -186,6 +186,11 @@
           "default": true,
           "description": "Re-narrate the file when it is saved, if the narration pane is open and showing that file."
         },
+        "codeNarration.liveEdit": {
+          "type": "boolean",
+          "default": false,
+          "description": "Re-narrate the file as you type, after a brief pause, while the narration pane is open and showing that file. Applies only to file-mode narration; diff and tree-diff targets are pinned and ignore this setting. Each settled edit hits the per-section cache, so only sections whose source actually changed call the language model."
+        },
         "codeNarration.followActiveEditor": {
           "type": "boolean",
           "default": false,

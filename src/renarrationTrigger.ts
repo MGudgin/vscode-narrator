@@ -8,8 +8,9 @@ import { targetMatchesSavedDoc, shouldFollowEditor } from './target';
 export const SAVE_DEBOUNCE_MS = 500;
 export const REPO_STATE_DEBOUNCE_MS = 750;
 export const ACTIVE_EDITOR_DEBOUNCE_MS = 250;
+export const LIVE_EDIT_DEBOUNCE_MS = 1500;
 
-export type TriggerSource = 'save' | 'repoState' | 'activeEditor';
+export type TriggerSource = 'save' | 'repoState' | 'activeEditor' | 'liveEdit';
 
 export interface TriggerRunOptions {
     skipCache?: boolean;
@@ -143,4 +144,30 @@ export function evaluateActiveEditorTrigger(input: ActiveEditorTriggerInput): Tr
     });
     if (!allow || !input.newDocUri) return { allow: false };
     return { allow: true, target: { kind: 'file', uri: input.newDocUri as never } };
+}
+
+export interface LiveEditTriggerInput {
+    panelOpen: boolean;
+    liveEditEnabled: boolean;
+    currentTarget: NarrationTarget | undefined;
+    changedDocUri: { toString(): string };
+}
+
+/**
+ * Predicate for #26 live-edit mode. Re-narration is allowed only when:
+ *   - The narration panel is open.
+ *   - The `codeNarration.liveEdit` setting is on.
+ *   - The current target is a file narration (diff/tree targets are pinned).
+ *   - The changed document is the one currently being narrated.
+ *
+ * "Stopped typing" is enforced by the trigger's debounce window, not here.
+ */
+export function evaluateLiveEditTrigger(input: LiveEditTriggerInput): TriggerEvaluation {
+    if (!input.panelOpen || !input.currentTarget) return { allow: false };
+    if (!input.liveEditEnabled) return { allow: false };
+    if (input.currentTarget.kind !== 'file') return { allow: false };
+    if (input.changedDocUri.toString() !== input.currentTarget.uri.toString()) {
+        return { allow: false };
+    }
+    return { allow: true, target: input.currentTarget };
 }

@@ -28,9 +28,11 @@ import {
     SAVE_DEBOUNCE_MS,
     REPO_STATE_DEBOUNCE_MS,
     ACTIVE_EDITOR_DEBOUNCE_MS,
+    LIVE_EDIT_DEBOUNCE_MS,
     evaluateSaveTrigger,
     evaluateRepoStateTrigger,
     evaluateActiveEditorTrigger,
+    evaluateLiveEditTrigger,
 } from './renarrationTrigger';
 
 export type ProviderFactory = (
@@ -84,6 +86,7 @@ let selectionDebounce: NodeJS.Timeout | undefined;
 let saveTrigger: RenarrationTrigger<vscode.TextDocument> | undefined;
 let repoStateTrigger: RenarrationTrigger<void> | undefined;
 let activeEditorTrigger: RenarrationTrigger<vscode.TextEditor | undefined> | undefined;
+let liveEditTrigger: RenarrationTrigger<vscode.TextDocument> | undefined;
 let repoWatcher: vscode.Disposable | undefined;
 let watchedRepoRoot: string | undefined;
 let repoWatcherPrimed = false;
@@ -93,6 +96,7 @@ const sectionRanges: { id: string; range: vscode.Range }[] = [];
 const SELECTION_DEBOUNCE_MS = 200;
 
 let cachedNarrateOnSave: boolean | undefined;
+let cachedLiveEdit: boolean | undefined;
 
 function readNarrateOnSave(): boolean {
     if (cachedNarrateOnSave === undefined) {
@@ -107,6 +111,21 @@ function refreshNarrateOnSaveCache(): void {
     cachedNarrateOnSave = vscode.workspace
         .getConfiguration('codeNarration')
         .get<boolean>('narrateOnSave', true);
+}
+
+function readLiveEdit(): boolean {
+    if (cachedLiveEdit === undefined) {
+        cachedLiveEdit = vscode.workspace
+            .getConfiguration('codeNarration')
+            .get<boolean>('liveEdit', false);
+    }
+    return cachedLiveEdit;
+}
+
+function refreshLiveEditCache(): void {
+    cachedLiveEdit = vscode.workspace
+        .getConfiguration('codeNarration')
+        .get<boolean>('liveEdit', false);
 }
 
 interface RunOptions {
@@ -180,11 +199,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionApi {
         vscode.commands.registerCommand('codeNarration.stopSpeech', () => speechControl('stop')),
         vscode.commands.registerCommand('codeNarration.pickVoice', () => pickVoice()),
         vscode.workspace.onDidSaveTextDocument((doc) => saveTrigger?.fire(doc)),
+        vscode.workspace.onDidChangeTextDocument((e) => liveEditTrigger?.fire(e.document)),
         vscode.window.onDidChangeTextEditorSelection(onSelectionChange),
         vscode.window.onDidChangeActiveTextEditor((editor) => activeEditorTrigger?.fire(editor)),
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('codeNarration.speech')) onSpeechConfigChange();
             if (e.affectsConfiguration('codeNarration.narrateOnSave')) refreshNarrateOnSaveCache();
+            if (e.affectsConfiguration('codeNarration.liveEdit')) refreshLiveEditCache();
         }),
     );
     return {
@@ -272,15 +293,18 @@ export function deactivate(): void {
     saveTrigger?.cancel();
     repoStateTrigger?.cancel();
     activeEditorTrigger?.cancel();
+    liveEditTrigger?.cancel();
     saveTrigger = undefined;
     repoStateTrigger = undefined;
     activeEditorTrigger = undefined;
+    liveEditTrigger = undefined;
     if (selectionDebounce) clearTimeout(selectionDebounce);
     repoWatcher?.dispose();
     repoWatcher = undefined;
     watchedRepoRoot = undefined;
     repoWatcherPrimed = false;
     cachedNarrateOnSave = undefined;
+    cachedLiveEdit = undefined;
 }
 
 function initTriggers(context: vscode.ExtensionContext): void {
@@ -314,6 +338,17 @@ function initTriggers(context: vscode.ExtensionContext): void {
                 .get<boolean>('followActiveEditor', false),
             currentTarget,
             newDocUri: editor?.document.uri,
+        }),
+        (target) => void runNarration(context, target),
+    );
+    liveEditTrigger = new RenarrationTrigger<vscode.TextDocument>(
+        'liveEdit',
+        LIVE_EDIT_DEBOUNCE_MS,
+        (doc) => evaluateLiveEditTrigger({
+            panelOpen: panel !== undefined,
+            liveEditEnabled: readLiveEdit(),
+            currentTarget,
+            changedDocUri: doc.uri,
         }),
         (target) => void runNarration(context, target),
     );
