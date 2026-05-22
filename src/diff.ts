@@ -38,7 +38,10 @@ interface GitRepository {
     state: GitRepositoryState;
     diffWith(ref: string): Promise<GitChange[]>;
     diffWith(ref: string, path: string): Promise<string>;
+    diffBetween(ref1: string, ref2: string): Promise<GitChange[]>;
+    diffBetween(ref1: string, ref2: string, path: string): Promise<string>;
     show(ref: string, path: string): Promise<string>;
+    log(options?: { maxEntries?: number }): Promise<GitCommit[]>;
 }
 
 interface GitRepositoryState {
@@ -52,6 +55,16 @@ interface GitChange {
     status: number;
 }
 
+export interface GitCommit {
+    hash: string;
+    message: string;
+    parents?: string[];
+    authorName?: string;
+    authorEmail?: string;
+    authorDate?: Date;
+    commitDate?: Date;
+}
+
 // vscode.git Status enum values we care about. Numeric to avoid pulling
 // the git extension's d.ts into the build.
 const STATUS_INDEX_MODIFIED = 0;
@@ -62,7 +75,11 @@ const STATUS_MODIFIED = 5;
 const STATUS_DELETED = 6;
 const STATUS_UNTRACKED = 7;
 
-export async function getDiff(uri: vscode.Uri, baseRef: string): Promise<DiffResult> {
+export async function getDiff(
+    uri: vscode.Uri,
+    baseRef: string,
+    headRef?: string,
+): Promise<DiffResult> {
     const api = await getGitApi();
     if (!api) throw new Error('The built-in Git extension is not available.');
 
@@ -81,14 +98,71 @@ export async function getDiff(uri: vscode.Uri, baseRef: string): Promise<DiffRes
 
     let unifiedDiff = '';
     try {
-        unifiedDiff = await repo.diffWith(baseRef, fsPath);
+        unifiedDiff = headRef
+            ? await repo.diffBetween(baseRef, headRef, fsPath)
+            : await repo.diffWith(baseRef, fsPath);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`git diff failed for "${baseRef}": ${msg}`);
+        const label = headRef ? `${baseRef}..${headRef}` : baseRef;
+        throw new Error(`git diff failed for "${label}": ${msg}`);
     }
 
     if (!unifiedDiff || unifiedDiff.trim() === '') return { kind: 'noChanges' };
     return { kind: 'modified', unifiedDiff };
+}
+
+/**
+ * Fetch a file's full text at a specific git ref. Returns `undefined` when
+ * the file does not exist at that ref (e.g. a newly added file's parent
+ * commit). Throws when the git extension is unavailable or no repository
+ * contains the uri.
+ */
+export async function getFileAtRef(uri: vscode.Uri, ref: string): Promise<string | undefined> {
+    const api = await getGitApi();
+    if (!api) throw new Error('The built-in Git extension is not available.');
+    const repo = api.getRepository(uri);
+    if (!repo) throw new Error('This file is not in a git repository.');
+    try {
+        return await repo.show(ref, uri.fsPath);
+    } catch {
+        return undefined;
+    }
+}
+
+export interface CommitSummary {
+    hash: string;
+    /** Short prefix of `hash`, suitable for UI display. */
+    abbrSha: string;
+    /** First line of the commit message. */
+    subject: string;
+    authorName?: string;
+    authorDate?: Date;
+}
+
+/**
+ * List the most recent commits in the repository containing `uri`. Returns an
+ * empty array if no repo matches the uri. Throws when the git extension is
+ * unavailable.
+ */
+export async function listRecentCommits(uri: vscode.Uri, maxEntries: number): Promise<CommitSummary[]> {
+    const api = await getGitApi();
+    if (!api) throw new Error('The built-in Git extension is not available.');
+    const repo = api.getRepository(uri);
+    if (!repo) return [];
+    const commits = await repo.log({ maxEntries });
+    return commits.map((c) => summarizeCommit(c));
+}
+
+/** Pure: derive a `CommitSummary` from a raw `GitCommit`. Exported for tests. */
+export function summarizeCommit(c: GitCommit): CommitSummary {
+    const subject = (c.message ?? '').split('\n', 1)[0]?.trim() ?? '';
+    return {
+        hash: c.hash,
+        abbrSha: c.hash.slice(0, 7),
+        subject,
+        authorName: c.authorName,
+        authorDate: c.authorDate,
+    };
 }
 
 export async function getTreeDiff(repoRoot: vscode.Uri, baseRef: string): Promise<TreeDiffResult> {
