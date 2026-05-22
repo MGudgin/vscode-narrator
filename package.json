@@ -254,6 +254,22 @@
           "minimum": 0,
           "maximum": 2,
           "description": "Speech pitch multiplier (0 = lowest, 2 = highest)."
+        },
+        "codeNarration.speech.provider": {
+          "type": "string",
+          "enum": [
+            "webSpeech",
+            "azure",
+            "elevenlabs",
+            "openai"
+          ],
+          "default": "webSpeech",
+          "description": "TTS backend for spoken narration. 'webSpeech' uses the system's installed voices via the Web Speech API (default). 'azure', 'elevenlabs', and 'openai' are cloud providers — currently stubs; selecting one requires codeNarration.speech.providerExperimental to be true, otherwise the default is used. See docs/tts-providers.md."
+        },
+        "codeNarration.speech.providerExperimental": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to non-default TTS providers (cloud voices). While false, codeNarration.speech.provider falls back to 'webSpeech' regardless of its value. Intended for developers wiring up Azure / ElevenLabs / OpenAI integrations — see docs/tts-providers.md."
         }
       }
     },
