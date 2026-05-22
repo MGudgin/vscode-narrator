@@ -79,12 +79,27 @@ Built-in personas:
 | `tests` | Branches and edge cases that aren't covered. What tests would I write? |
 | `onboarding` | Explain this to someone new to the codebase. Frame intent before mechanics. |
 
+### Per-invocation override
+
+**Code Narration: Open Narration with…** and **Code Narration: Open Diff Narration with…** prompt for a persona via quick-pick (or take one as a command argument) and use it just for that narration. Subsequent save/refresh re-runs of the same target keep using the chosen persona; opening a fresh narration without `with…` reverts to the `codeNarration.persona` setting. A keybinding can target a specific persona by passing its id:
+
+```jsonc
+// keybindings.json
+{
+  "key": "ctrl+shift+s",
+  "command": "codeNarration.openDiffWithPersona",
+  "args": "security"
+}
+```
+
 ## Commands
 
 | Command | Description |
 | --- | --- |
 | Code Narration: Open Narration | Narrate the active file |
 | Code Narration: Open Diff Narration | Narrate the active file's diff vs base ref |
+| Code Narration: Open Narration with… | Narrate the active file with a persona override (#23). Persona id can be passed as an argument for keybindings. |
+| Code Narration: Open Diff Narration with… | Same, for diff narration. |
 | Code Narration: Open Tree Diff Narration | Narrate every changed file in the repo vs base ref |
 | Code Narration: Refresh Narration | Re-run, bypassing the cache |
 | Code Narration: Pick Model | Quick-pick a model |

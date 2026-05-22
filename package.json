@@ -47,6 +47,16 @@
         "icon": "$(git-compare)"
       },
       {
+        "command": "codeNarration.openWithPersona",
+        "title": "Open Narration with…",
+        "category": "Code Narration"
+      },
+      {
+        "command": "codeNarration.openDiffWithPersona",
+        "title": "Open Diff Narration with…",
+        "category": "Code Narration"
+      },
+      {
         "command": "codeNarration.openTreeDiff",
         "title": "Open Tree Diff Narration",
         "category": "Code Narration",
