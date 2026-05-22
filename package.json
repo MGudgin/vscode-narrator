@@ -1,7 +1,7 @@
 {
   "name": "code-narration",
-  "displayName": "Code Narration",
-  "description": "LLM-powered narration of code and diffs in a side pane.",
+  "displayName": "Code Narration — read & speak your code",
+  "description": "LLM-powered narrator that explains source files and diffs in a side pane, with optional spoken playback via the system's text-to-speech voices.",
   "version": "0.3.0",
   "publisher": "gudge",
   "license": "MIT",
@@ -256,7 +256,61 @@
           "description": "Speech pitch multiplier (0 = lowest, 2 = highest)."
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "codeNarration.speech",
+        "title": "Listen to your code (spoken narration)",
+        "description": "Turn Code Narration into a true narrator: pick a voice, hit play, and have your codebase read aloud while you read along.",
+        "steps": [
+          {
+            "id": "codeNarration.speech.enable",
+            "title": "Enable spoken narration",
+            "description": "Spoken narration is off by default. Enable `codeNarration.speech.enabled` to show the speech controls (play / pause / stop, voice picker, rate slider) in the narration pane banner.\n[Open speech settings](command:workbench.action.openSettings?%22codeNarration.speech%22)",
+            "media": {
+              "markdown": "media/walkthroughs/enable-speech.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:codeNarration.speech.enabled"
+            ]
+          },
+          {
+            "id": "codeNarration.speech.pickVoice",
+            "title": "Pick a voice",
+            "description": "Pick from any speech voice your OS exposes. Either use the dropdown in the narration pane's banner, or run **Code Narration: Pick Voice** for a searchable quick-pick.\n[Pick a voice](command:codeNarration.pickVoice)",
+            "media": {
+              "markdown": "media/walkthroughs/pick-voice.md"
+            },
+            "completionEvents": [
+              "onCommand:codeNarration.pickVoice",
+              "onSettingChanged:codeNarration.speech.voice"
+            ]
+          },
+          {
+            "id": "codeNarration.speech.play",
+            "title": "Play a narration aloud",
+            "description": "Open a narration on the active file, then start spoken playback. Per-section ▶ buttons jump speech to that section.\n[Open Narration](command:codeNarration.open)\n[Speak Narration](command:codeNarration.speak)",
+            "media": {
+              "markdown": "media/walkthroughs/play-narration.md"
+            },
+            "completionEvents": [
+              "onCommand:codeNarration.speak"
+            ]
+          },
+          {
+            "id": "codeNarration.speech.autoPlay",
+            "title": "Configure auto-play, rate, and pitch",
+            "description": "Have sentences spoken as they stream in, or tweak `rate` and `pitch` to taste.\n[Open speech settings](command:workbench.action.openSettings?%22codeNarration.speech%22)",
+            "media": {
+              "markdown": "media/walkthroughs/auto-play.md"
+            },
+            "completionEvents": [
+              "onSettingChanged:codeNarration.speech.autoPlay"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "compile": "npm run check-types && npm run lint && node esbuild.js",
