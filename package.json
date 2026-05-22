@@ -161,24 +161,62 @@
         },
         "codeNarration.persona": {
           "type": "string",
-          "enum": [
-            "default",
-            "critical",
-            "security",
-            "performance",
-            "tests",
-            "onboarding"
-          ],
-          "enumDescriptions": [
-            "What does this code do and why does it exist?",
-            "What's questionable, missing, or risky? Pushback you'd raise in PR review.",
-            "Untrusted input flow, auth, injection, secrets, dependency risks.",
-            "Hot paths, allocations, blocking calls, async pitfalls, big-O concerns.",
-            "Branches and edge cases that aren't covered. What tests would I write?",
-            "Explain this to someone new. Frame intent before mechanics."
-          ],
           "default": "default",
-          "description": "Active narration persona. Each persona reuses the same output formatting rules but applies a different review lens. Custom personas declared in `codeNarration.customPersonas` are also accepted here once that feature lands."
+          "markdownDescription": "Active narration persona. Each persona reuses the same output formatting rules but applies a different review lens.\n\nBuilt-in ids: `default`, `critical`, `security`, `performance`, `tests`, `onboarding`. Custom ids defined in `#codeNarration.customPersonas#` are also accepted. Unknown ids fall back to `default`."
+        },
+        "codeNarration.customPersonas": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "User-defined personas, keyed by id. Each value may set `displayName`, `description`, and prompt overrides: `preamble` (composed onto the built-in output rules) or full overrides via `systemPrompt`, `symbolSystemPrompt`, `diffSystemPrompt`, `treeSummarySystemPrompt`, `treeFileDiffSystemPrompt`. Ids must be 1-64 chars (letters, digits, `-`, `_`) and cannot collide with built-in ids. Prompt strings are capped at 8000 chars each. Invalid entries are skipped at load time with a warning.",
+          "patternProperties": {
+            "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "displayName": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "User-visible name shown in the persona quick-pick."
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "Short description shown as quick-pick detail."
+                },
+                "preamble": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "Lens sentence prepended to the built-in base prompts for any slot not overridden below. Lets you extend the default output rules without re-specifying them."
+                },
+                "systemPrompt": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "Full override for whole-file narration. Skip to inherit the base prompt (optionally with `preamble`)."
+                },
+                "symbolSystemPrompt": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "Full override for per-symbol narration."
+                },
+                "diffSystemPrompt": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "Full override for diff narration."
+                },
+                "treeSummarySystemPrompt": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "Full override for the tree-diff summary section."
+                },
+                "treeFileDiffSystemPrompt": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "Full override for per-file tree-diff narration."
+                }
+              }
+            }
+          },
+          "additionalProperties": false
         },
         "codeNarration.anthropic.maxOutputTokens": {
           "type": "integer",

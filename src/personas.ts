@@ -220,3 +220,196 @@ export function buildPersonaFromLens(args: {
         prompts,
     };
 }
+
+/**
+ * Maximum length of a single user-supplied prompt string. Prevents a
+ * malformed config from silently breaking narration (e.g. a 1 MB blob
+ * blowing past the model's context window).
+ */
+export const CUSTOM_PROMPT_MAX_CHARS = 8_000;
+
+/** Maximum length of a displayName / id / description. */
+export const CUSTOM_LABEL_MAX_CHARS = 120;
+
+/** Per-id field shape accepted in the `codeNarration.customPersonas` setting. */
+export interface CustomPersonaSpec {
+    /** User-visible name; shown in quick-pick. */
+    displayName?: string;
+    /** One-line description; shown in quick-pick detail. */
+    description?: string;
+    /**
+     * Optional lens preamble. If provided, slots not overridden below are
+     * composed by prepending this sentence to the built-in base prompts.
+     */
+    preamble?: string;
+    /** Full override for whole-file narration. */
+    systemPrompt?: string;
+    /** Full override for symbol-section narration. */
+    symbolSystemPrompt?: string;
+    /** Full override for diff narration. */
+    diffSystemPrompt?: string;
+    /** Full override for tree-diff summary narration. */
+    treeSummarySystemPrompt?: string;
+    /** Full override for per-file tree-diff narration. */
+    treeFileDiffSystemPrompt?: string;
+}
+
+export interface CustomPersonaError {
+    id: string;
+    reason: string;
+}
+
+export interface LoadCustomPersonasResult {
+    personas: Map<string, Persona>;
+    errors: CustomPersonaError[];
+}
+
+const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+    return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function validateString(
+    field: string,
+    value: unknown,
+    maxLen: number,
+    required: boolean,
+): { ok: true; value: string | undefined } | { ok: false; reason: string } {
+    if (value === undefined || value === null) {
+        if (required) return { ok: false, reason: `missing required field "${field}"` };
+        return { ok: true, value: undefined };
+    }
+    if (typeof value !== 'string') {
+        return { ok: false, reason: `field "${field}" must be a string` };
+    }
+    if (value.length > maxLen) {
+        return { ok: false, reason: `field "${field}" exceeds ${maxLen}-character limit (${value.length})` };
+    }
+    return { ok: true, value };
+}
+
+/**
+ * Build a Persona from a validated custom spec. Slots not provided fall back
+ * to the lens preamble (if any) layered on the base prompts, which gives the
+ * user the "default boilerplate" they can extend without re-specifying the
+ * shared output formatting rules.
+ */
+function personaFromSpec(id: string, spec: CustomPersonaSpec): Persona {
+    const base = composePromptsFromLens(spec.preamble ?? '');
+    const prompts: PersonaPrompts = {
+        system: spec.systemPrompt ?? base.system,
+        symbolSystem: spec.symbolSystemPrompt ?? base.symbolSystem,
+        diffSystem: spec.diffSystemPrompt ?? base.diffSystem,
+        treeSummarySystem: spec.treeSummarySystemPrompt ?? base.treeSummarySystem,
+        treeFileDiffSystem: spec.treeFileDiffSystemPrompt ?? base.treeFileDiffSystem,
+    };
+    const label = spec.displayName && spec.displayName.length > 0 ? spec.displayName : id;
+    const description = spec.description ?? '';
+    return {
+        id,
+        label,
+        description,
+        source: 'custom',
+        cacheTag: `custom:${id}:${hashPersonaPrompts(prompts)}`,
+        prompts,
+    };
+}
+
+/**
+ * Validate a raw `codeNarration.customPersonas` value and return the
+ * persona map plus a list of per-entry errors. Malformed entries are skipped
+ * rather than failing the whole map, so a single typo doesn't break the
+ * other custom personas.
+ *
+ * Visible for tests; the runtime entry point is `loadCustomPersonasFromConfig`.
+ */
+export function validateCustomPersonas(raw: unknown): LoadCustomPersonasResult {
+    const personas = new Map<string, Persona>();
+    const errors: CustomPersonaError[] = [];
+
+    if (raw === undefined || raw === null) {
+        return { personas, errors };
+    }
+    if (!isPlainObject(raw)) {
+        errors.push({ id: '', reason: '`codeNarration.customPersonas` must be an object map keyed by persona id' });
+        return { personas, errors };
+    }
+
+    for (const [id, entry] of Object.entries(raw)) {
+        if (!ID_RE.test(id)) {
+            errors.push({
+                id,
+                reason: 'persona id must be 1-64 chars of letters, digits, hyphen, or underscore (start with a letter or digit)',
+            });
+            continue;
+        }
+        if (BUILT_IN_PERSONAS.has(id)) {
+            errors.push({ id, reason: `persona id "${id}" collides with a built-in persona; choose another id` });
+            continue;
+        }
+        if (!isPlainObject(entry)) {
+            errors.push({ id, reason: 'persona entry must be an object' });
+            continue;
+        }
+
+        const fields: Array<[keyof CustomPersonaSpec, number, boolean]> = [
+            ['displayName', CUSTOM_LABEL_MAX_CHARS, false],
+            ['description', CUSTOM_LABEL_MAX_CHARS, false],
+            ['preamble', CUSTOM_PROMPT_MAX_CHARS, false],
+            ['systemPrompt', CUSTOM_PROMPT_MAX_CHARS, false],
+            ['symbolSystemPrompt', CUSTOM_PROMPT_MAX_CHARS, false],
+            ['diffSystemPrompt', CUSTOM_PROMPT_MAX_CHARS, false],
+            ['treeSummarySystemPrompt', CUSTOM_PROMPT_MAX_CHARS, false],
+            ['treeFileDiffSystemPrompt', CUSTOM_PROMPT_MAX_CHARS, false],
+        ];
+        const spec: CustomPersonaSpec = {};
+        let fieldError: string | undefined;
+        for (const [name, maxLen, required] of fields) {
+            const res = validateString(name as string, entry[name as string], maxLen, required);
+            if (!res.ok) {
+                fieldError = res.reason;
+                break;
+            }
+            if (res.value !== undefined) {
+                (spec as Record<string, string>)[name as string] = res.value;
+            }
+        }
+        if (fieldError) {
+            errors.push({ id, reason: fieldError });
+            continue;
+        }
+
+        // Reject entries that contribute no override at all — they would be
+        // indistinguishable from the default persona and just clutter the
+        // quick-pick.
+        const hasAnyPrompt = Boolean(
+            spec.preamble ||
+                spec.systemPrompt ||
+                spec.symbolSystemPrompt ||
+                spec.diffSystemPrompt ||
+                spec.treeSummarySystemPrompt ||
+                spec.treeFileDiffSystemPrompt,
+        );
+        if (!hasAnyPrompt) {
+            errors.push({ id, reason: 'persona must define at least one of: preamble, systemPrompt, symbolSystemPrompt, diffSystemPrompt, treeSummarySystemPrompt, treeFileDiffSystemPrompt' });
+            continue;
+        }
+
+        personas.set(id, personaFromSpec(id, spec));
+    }
+
+    return { personas, errors };
+}
+
+/**
+ * Runtime entry point: read `codeNarration.customPersonas` from VS Code
+ * settings and produce a validated persona map. Errors are returned alongside
+ * the (possibly partial) map so the caller can surface them as a one-shot
+ * warning rather than failing narration.
+ */
+export function loadCustomPersonasFromConfig(): LoadCustomPersonasResult {
+    const cfg = vscode.workspace.getConfiguration('codeNarration');
+    const raw = cfg.get<unknown>('customPersonas');
+    return validateCustomPersonas(raw);
+}
