@@ -2,6 +2,15 @@
 
 LLM-powered narration of source files and diffs, rendered in a side pane in VS Code.
 
+![Code Narration in action — editor on the left, streaming narration pane on the right](media/screenshots/narration-pane.png)
+
+<!--
+  TODO(#37): the image above is a 1×1 transparent PNG placeholder. Replace
+  with a real screenshot (or short GIF) of the extension running — editor
+  on the left, narration pane on the right with at least one completed
+  section and a streaming-amber dot mid-flight. See media/screenshots/.
+-->
+
 The extension splits a file into its symbols (top-level by default; recursive on opt-in), fans out parallel calls to a language model, and streams each section's markdown narration into a webview beside the editor. Section headings are deep links into the source, and a per-section status dot tracks each call's progress. Diff mode narrates only what changed vs a configurable git ref.
 
 ## Install (from VSIX)
