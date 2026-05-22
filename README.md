@@ -79,6 +79,10 @@ Built-in personas:
 | `performance` | Hot paths, allocations, blocking calls, async pitfalls, big-O concerns. |
 | `tests` | Branches and edge cases that aren't covered. What tests would I write? |
 | `onboarding` | Explain this to someone new to the codebase. Frame intent before mechanics. |
+| `refactor-scout` | Concrete restructurings that would simplify or de-duplicate this code. |
+| `doc-comment-writer` | Output formatted as docstrings/inline comments aimed at a future maintainer. |
+| `accessibility-reviewer` | ARIA, keyboard navigation, contrast, hard-coded user-facing strings. |
+| `cost-analyst` | Retry storms, fan-out, idempotency, expensive synchronous calls in hot paths. |
 
 ### Per-invocation override
 
